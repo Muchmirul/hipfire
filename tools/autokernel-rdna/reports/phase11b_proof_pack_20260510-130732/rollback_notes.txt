@@ -1,0 +1,31 @@
+# Rollback Notes
+
+## Full rollback (remove all autokernel tooling)
+
+The autokernel PR adds ONLY tooling under tools/autokernel-rdna/
+and one retained negative-result kernel file:
+  kernels/src/gemv_hfq4g256_residual.gfx12.hip
+
+No Rust crate sources were modified. No dispatch paths were changed.
+
+To roll back completely:
+
+  git log --oneline | grep autokernel   # find the first autokernel commit
+  git revert --no-commit <first-sha>..<HEAD>
+  git commit -m 'revert: remove autokernel tooling'
+
+Or more precisely, revert the two autokernel commits:
+  git revert c74e5d9 c148ca0 7bad524
+
+## Partial rollback (keep tooling, remove kernel artifact)
+
+  git checkout origin/main -- kernels/src/gemv_hfq4g256_residual.gfx12.hip 2>/dev/null
+  # or, if the file didn't exist upstream:
+  git rm kernels/src/gemv_hfq4g256_residual.gfx12.hip
+  git commit -m 'chore: remove retained negative-result kernel artifact'
+
+## Verification after rollback
+
+  bash scripts/test-kernels.sh gfx1201
+  bash scripts/speed-gate.sh
+  # Expect: same numbers as pre-PR baseline

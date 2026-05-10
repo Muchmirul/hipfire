@@ -1,0 +1,22 @@
+# Next Kernel Recommendation
+
+From profile report (profile_20260510-122608.md):
+
+| Rank | Kernel | Cycle % | Amdahl Limit | Recommended Action |
+|---|---|---|---|---|
+| 1 | gemv_hfq6g256 | 18% | +22% decode | Try 6x-unroll + bf16 accumulate on gfx12 |
+| 2 | attention_flash_asym3_tile | 12% | +14% decode | Tune tile size for gfx1201 wave32 |
+| 3 | gemv_hfq4g256 (main) | 20% | +25% decode | Try wave64 on gfx1201 (wave32 default) |
+
+## Recommendation
+
+Start with gemv_hfq6g256 (6-bit quant path):
+  - Wider operands → more parallelism per group
+  - Less sensitive to prefetch overhead than residual path
+  - gfx12-safe (gfx1200 + gfx1201 cover same WMMA tier)
+
+Command to start Phase 12:
+  ./tools/autokernel-rdna/run.sh experiment --kernel gemv_hfq6g256 --arch gfx1201
+
+Prerequisite: run phase11_validate.sh --self-test && check_results_tsv.sh
+both must pass before starting Phase 12.

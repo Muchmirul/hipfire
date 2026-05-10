@@ -1,0 +1,45 @@
+# git diff --stat (autokernel PR scope)
+# Branch: pr-1, HEAD: c74e5d986978b66b5e78d8401919c9b2288ee83f
+# Date: Sun May 10 01:07:32 PM UTC 2026
+
+ Cargo.lock                                         |  29 +
+ cli/index.ts                                       |  72 +-
+ crates/hipfire-arch-qwen35/src/qwen35.rs           |  14 +
+ crates/hipfire-detect/src/report.rs                |  42 +-
+ crates/hipfire-quantize/src/main.rs                | 640 +++++++++++++-
+ crates/hipfire-runtime/Cargo.toml                  |  14 +
+ crates/hipfire-runtime/examples/coherence_probe.rs |  40 +
+ crates/hipfire-runtime/examples/daemon.rs          | 226 ++++-
+ crates/hipfire-runtime/examples/jinja_smoke.rs     | 369 ++++++++
+ crates/hipfire-runtime/examples/render_bench.rs    | 188 ++++
+ .../examples/render_chat_template.rs               |  68 ++
+ crates/hipfire-runtime/src/hfq.rs                  |  30 +
+ crates/hipfire-runtime/src/lib.rs                  |   1 +
+ crates/hipfire-runtime/src/llama.rs                |  21 +-
+ crates/hipfire-runtime/src/prompt_frame.rs         | 374 +++++++-
+ crates/hipfire-runtime/src/tokenizer.rs            |  44 +-
+ crates/hipfire-runtime/src/tool_call.rs            | 581 ++++++++++++
+ crates/hipfire-runtime/templates/gemma-4-it.jinja  | 354 ++++++++
+ crates/rdna-compute/examples/test_gemv_hfp4g32.rs  | 244 +++++
+ crates/rdna-compute/examples/test_gemv_mfp4g32.rs  | 305 +++++++
+ crates/rdna-compute/src/dispatch.rs                | 345 ++++++--
+ crates/rdna-compute/src/kernels.rs                 |  23 +
+ docs/methodology/perf-benchmarking.md              |  72 ++
+ docs/quant-formats/hfp4.md                         | 268 ++++++
+ kernels/src/gemv_hfp4g32.gfx1100.hip               | 177 ++++
+ kernels/src/gemv_hfp4g32.hip                       | 177 ++++
+ kernels/src/gemv_hfq4g256_residual.gfx12.hip       | 126 +++
+ tools/autokernel-rdna/README.md                    | 162 ++++
+ tools/autokernel-rdna/baselines/.gitkeep           |   0
+ .../autokernel-rdna/baselines/20260510-122038.json |  24 +
+ .../autokernel-rdna/baselines/20260510-122503.json |  22 +
+ tools/autokernel-rdna/config.example.toml          |  66 ++
+ tools/autokernel-rdna/experiments/.gitkeep         |   0
+ tools/autokernel-rdna/reports/.gitkeep             |   0
+ tools/autokernel-rdna/reports/final_20260510.md    |  87 ++
+ .../reports/phase11_validation_20260510.md         | 133 +++
+ .../reports/profile_20260510-122608.json           |   8 +
+ .../reports/profile_20260510-122608.md             |  40 +
+ tools/autokernel-rdna/results.tsv                  |   2 +
+ tools/autokernel-rdna/run.sh                       | 979 +++++++++++++++++++++
+ 40 files changed, 6244 insertions(+), 123 deletions(-)

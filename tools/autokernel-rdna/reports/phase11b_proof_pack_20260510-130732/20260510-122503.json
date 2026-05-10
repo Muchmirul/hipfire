@@ -1,0 +1,22 @@
+{
+  "timestamp": "2026-05-10T12:25:49Z",
+  "arch": "gfx1201",
+  "target_arch": "gfx1201",
+  "gpu_name": "0x7550",
+  "rocm_version": "7.2.1",
+  "hipcc_version": "HIP version: 7.2.53211-e1a6bc5663 unknown",
+  "git_sha": "7bad524e1947f597b169853b7489e7a2ecdbf7d5",
+  "git_dirty_files": 2,
+  "model": "qwen3.5:9b",
+  "bench_prompt": "lru_cache_pep8_strict.txt",
+  "prompt_md5": "df5dedc8040ce70ba55080c4548e6024",
+  "kernel_cache_path": "/home/dev/.hipfire/bin/kernels",
+  "models_dir": "/media/dev/Tforce/dev/radeonmax/baselines/hipfire/.hipfire/models",
+  "hipfire_env": "HIPFIRE_MODELS_DIR=/media/dev/Tforce/dev/radeonmax/baselines/hipfire/.hipfire/models ",
+  "trials": 3,
+  "baseline_decode_tok_s": 93.2,
+  "baseline_prefill_tok_s": 949,
+  "decode_stddev": 0.0471405,
+  "prefill_stddev": 5.40206,
+  "vram_mb": 0
+}

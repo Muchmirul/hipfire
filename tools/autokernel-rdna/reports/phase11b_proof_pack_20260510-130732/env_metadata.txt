@@ -1,0 +1,41 @@
+# Environment Metadata
+# Captured: Sun May 10 01:07:32 PM UTC 2026
+
+## Git
+HEAD SHA: c74e5d986978b66b5e78d8401919c9b2288ee83f
+Branch: pr-1
+Status: 6 modified files
+
+## GPU
+
+
+========================= ROCm System Management Interface =========================
+=================================== Product Info ===================================
+GPU[0]		: Card series: 		0x7550
+GPU[0]		: Card model: 		0x5417
+GPU[0]		: Card vendor: 		Advanced Micro Devices, Inc. [AMD/ATI]
+GPU[0]		: Card SKU: 		APM107819
+====================================================================================
+=============================== End of ROCm SMI Log ================================
+
+## ROCm / HIP
+7.2.1
+
+HIP version: 7.2.53211-e1a6bc5663
+AMD clang version 22.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.2.1 26084 f58b06dce1f9c15707c5f808fd002e18c2accf7e)
+
+## Cargo
+cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+
+## Models dir: /media/dev/Tforce/dev/radeonmax/baselines/hipfire/.hipfire/models
+qwen3.5-27b.mq4
+Qwen3.5-9B-BF16.mq4
+qwen3.5-9b.mq4
+
+## Prompt
+File: benchmarks/prompts/lru_cache_pep8_strict.txt
+MD5:  df5dedc8040ce70ba55080c4548e6024
+
+## Bench binary
+Path: target/release/examples/bench_qwen35_mq4
+MD5:  d849282e6f9df22f5081c2fb9f51a3e1
