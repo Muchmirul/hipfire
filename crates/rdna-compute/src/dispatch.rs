@@ -165,7 +165,7 @@ fn decode_autotune_samples_per_backend() -> u32 {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0)
-            .unwrap_or(6)
+            .unwrap_or(8)
     })
 }
 
