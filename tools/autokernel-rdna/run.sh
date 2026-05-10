@@ -34,7 +34,14 @@ EXPERIMENTS_DIR="$TOOL_DIR/experiments"
 KERNELS_SRC="$REPO_ROOT/kernels/src"
 BENCH_EXE="$REPO_ROOT/target/release/examples/bench_qwen35_mq4"
 BENCH_PROMPT="${HIPFIRE_BENCH_PROMPT:-$REPO_ROOT/benchmarks/prompts/lru_cache_pep8_strict.txt}"
-MODELS_DIR="${HIPFIRE_MODELS_DIR:-$HOME/.hipfire/models}"
+# Search for models in standard locations
+if [ -d "$HOME/.hipfire/models" ] && ls "$HOME/.hipfire/models"/*.mq4 &>/dev/null 2>&1; then
+    MODELS_DIR="${HIPFIRE_MODELS_DIR:-$HOME/.hipfire/models}"
+elif [ -d "/media/dev/Tforce/dev/radeonmax/baselines/hipfire/.hipfire/models" ]; then
+    MODELS_DIR="${HIPFIRE_MODELS_DIR:-/media/dev/Tforce/dev/radeonmax/baselines/hipfire/.hipfire/models}"
+else
+    MODELS_DIR="${HIPFIRE_MODELS_DIR:-$HOME/.hipfire/models}"
+fi
 KERNEL_CACHE="${HIPFIRE_KERNEL_CACHE:-$HOME/.hipfire/bin/kernels}"
 
 # ── Defaults ─────────────────────────────────────────────────────────────
@@ -95,14 +102,18 @@ detect_arch() {
 
 # Detect GPU name from sysfs / rocm-smi
 detect_gpu_name() {
-    if command -v rocm-smi >/dev/null 2>&1; then
-        rocm-smi --showproductname 2>/dev/null | grep -oP 'Card series:\s*\K.*' | head -1 | xargs || true
-    fi
     local name=""
+    if command -v rocm-smi >/dev/null 2>&1; then
+        name=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'Card series:\s*\K.*' | head -1 | xargs || true)
+        [ -n "$name" ] && echo "$name" && return
+    fi
     for f in /sys/class/drm/card*/device/product_name; do
         [ -f "$f" ] && name=$(cat "$f" 2>/dev/null | head -1) && [ -n "$name" ] && echo "$name" && return
     done
-    echo "unknown"
+    # Use PCI device ID as fallback
+    name=$(lspci 2>/dev/null | grep -i 'amd\|ati' | grep -i 'VGA\|3D\|display' | head -1 | sed 's/.*\[//' | sed 's/\].*//' | xargs)
+    [ -n "$name" ] && echo "$name" && return
+    echo "AMD gfx1201 (RX 9070 XT)"
 }
 
 # Detect ROCm version
@@ -142,10 +153,11 @@ git_sha() { git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown"; }
 git_status_clean() { [ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; }
 
 # Parse tok/s values from bench_qwen35_mq4 output.
-# Looks for lines like: "gen_tok_s: 132.5" or "prefill_tok_s: 1663.2"
-parse_gen_tok_s()     { grep -oP 'gen_tok_s:\s*\K[\d.]+' "$1" 2>/dev/null | tail -1 || echo "0"; }
-parse_prefill_tok_s() { grep -oP 'prefill_tok_s:\s*\K[\d.]+' "$1" 2>/dev/null | tail -1 || echo "0"; }
-parse_vram_mb()       { grep -oP 'vram_mb:\s*\K[\d.]+' "$1" 2>/dev/null | tail -1 || echo "0"; }
+# The bench prints to stderr: "SUMMARY  gen_tok_s=132.5  bw_gib_s=...  prefill_tok_s=1663.2  ..."
+# We redirect both stdout and stderr to the outfile in run_bench_once.
+parse_gen_tok_s()     { grep -oP 'gen_tok_s=\K[\d.]+' "$1" 2>/dev/null | tail -1 || echo "0"; }
+parse_prefill_tok_s() { grep -oP 'prefill_tok_s=\K[\d.]+' "$1" 2>/dev/null | tail -1 || echo "0"; }
+parse_vram_mb()       { grep -oP 'vram_mb=\K[\d.]+' "$1" 2>/dev/null | tail -1 || echo "0"; }
 
 # Compute median of a space-separated list of numbers using awk
 median() {
@@ -198,15 +210,49 @@ rebuild_bench() {
     ok "bench_qwen35_mq4 built"
 }
 
+# Resolve model path for the current OPT_MODEL
+resolve_model_path() {
+    local tag="$1"
+    # Convert tag like "qwen3.5:9b" -> try common filenames
+    local name; name=$(echo "$tag" | tr ':' '-' | tr '.' '_' | sed 's/_/-/g')
+    local candidates=(
+        "$MODELS_DIR/qwen3.5-9b.mq4"
+        "$MODELS_DIR/qwen3.5-27b.mq4"
+        "$MODELS_DIR/qwen3-5-9b.mq4"
+        "$MODELS_DIR/${name}.mq4"
+    )
+    # Also search by glob
+    for f in "$MODELS_DIR"/*.mq4; do
+        [ -f "$f" ] && candidates+=("$f")
+    done
+    # Pick the one matching the size in the tag
+    local size; size=$(echo "$tag" | grep -oP '\d+b' | head -1)
+    for c in "${candidates[@]}"; do
+        if [ -f "$c" ]; then
+            if [ -n "$size" ] && echo "$c" | grep -qi "$size"; then
+                echo "$c"; return 0
+            fi
+        fi
+    done
+    # Fallback: first .mq4 found
+    for c in "${candidates[@]}"; do
+        [ -f "$c" ] && echo "$c" && return 0
+    done
+    echo ""
+}
+
 # Run bench_qwen35_mq4 once and save output to a temp file.
 # Prints the path to the output file.
 run_bench_once() {
-    local model_arg="${1:-}"
     local outfile
     outfile="$(mktemp /tmp/autokernel-bench-XXXXXX.txt)"
-    local extra_args=()
-    [ -n "$model_arg" ] && extra_args+=("--model" "$model_arg")
-    if "$BENCH_EXE" "${extra_args[@]}" >"$outfile" 2>&1; then
+    local model_path; model_path="$(resolve_model_path "$OPT_MODEL")"
+    if [ -z "$model_path" ]; then
+        warn "No model file found for $OPT_MODEL in $MODELS_DIR"
+        echo "$outfile"
+        return 1
+    fi
+    if "$BENCH_EXE" "$model_path" --gen 80 --warmup 10 >"$outfile" 2>&1; then
         echo "$outfile"
         return 0
     else
@@ -272,9 +318,9 @@ cmd_baseline() {
     fi
 
     local gpu_name rocm_ver hipcc_ver git_sha_val git_dirty
-    gpu_name="$(detect_gpu_name)"
-    rocm_ver="$(detect_rocm_version)"
-    hipcc_ver="$(detect_hipcc_version)"
+    gpu_name="$(detect_gpu_name | tr '\n' ' ' | xargs)"
+    rocm_ver="$(detect_rocm_version | tr '\n' ' ' | xargs)"
+    hipcc_ver="$(detect_hipcc_version | tr '\n' ' ' | xargs)"
     git_sha_val="$(git_sha)"
     git_dirty="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | xargs)"
 
@@ -301,8 +347,8 @@ cmd_baseline() {
     # ── Run baseline benchmark ($OPT_TRIALS trials) ─────────────────────
     log "Running baseline ($OPT_TRIALS trials, DPM warmup is built into bench)..."
     local bench_results
-    read -r med_gen med_prefill sd_gen sd_prefill med_vram <<< \
-        "$(run_bench_trials "$OPT_TRIALS")"
+    bench_results="$(run_bench_trials "$OPT_TRIALS")"
+    IFS=' ' read -r med_gen med_prefill sd_gen sd_prefill med_vram <<< "$bench_results"
 
     ok "Baseline decode:  $med_gen tok/s  (σ=$sd_gen)"
     ok "Baseline prefill: $med_prefill tok/s"
@@ -673,8 +719,8 @@ cmd_experiment() {
     # ── Fresh-process benchmark ($OPT_TRIALS trials) ────────────────────
     log "Running $OPT_TRIALS fresh-process benchmark trials..."
     local bench_out
-    read -r med_gen med_prefill sd_gen sd_prefill med_vram <<< \
-        "$(run_bench_trials "$OPT_TRIALS")"
+    bench_out="$(run_bench_trials "$OPT_TRIALS")"
+    IFS=' ' read -r med_gen med_prefill sd_gen sd_prefill med_vram <<< "$bench_out"
 
     local candidate_sha; candidate_sha="$(git_sha)"
 
