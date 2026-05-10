@@ -304,6 +304,10 @@ pub const GEMV_HFQ4G256_SRC: &str = include_str!("../../../kernels/src/gemv_hfq4
 // v4: dp4a-packed    — launch_bounds(32,16), dp4a intrinsics, factored scale/zero
 // v5: cache-aggressive — launch_bounds(32,16), 2x unroll, packed loads, factored math
 pub const GEMV_HFQ4G256_GFX1100_SRC: &str = include_str!("../../../kernels/src/gemv_hfq4g256.gfx1100.hip");
+// Phase 12 negative-result artifact: 8x unroll + packed uint32 loads for gfx1201.
+// Benched 5 trials, median=93.2 vs baseline=93.1 — flat (bandwidth ceiling, REVERT).
+// File kept for posterity; not wired into dispatch.
+// pub const GEMV_HFQ4G256_GFX1201_SRC: &str = include_str!("../../../kernels/src/gemv_hfq4g256.gfx1201.hip");
 pub const GEMV_HFQ4G256_RESIDUAL_SRC: &str = include_str!("../../../kernels/src/gemv_hfq4g256_residual.hip");
 pub const GEMV_HFQ4G256_RESIDUAL_GFX1100_SRC: &str = include_str!("../../../kernels/src/gemv_hfq4g256_residual.gfx1100.hip");
 pub const GEMV_HFQ4G256_RESIDUAL_WAVE64_SRC: &str = include_str!("../../../kernels/src/gemv_hfq4g256_residual_wave64.hip");
@@ -633,8 +637,8 @@ pub fn gemv_hfq4g256_for_arch(arch: &str) -> (&'static str, &'static str) {
         "gfx1100" | "gfx1101" | "gfx1102" => {
             (GEMV_HFQ4G256_GFX1100_SRC, "gemv_hfq4g256_rdna3")
         }
-        // RDNA4 variants (existing)
-        // "gfx1200" | "gfx1201" => ...,
+        // RDNA4 variants: Phase 12 experiment (8x unroll) reverted — flat at bandwidth ceiling.
+        // "gfx1200" | "gfx1201" => (GEMV_HFQ4G256_GFX1201_SRC, "gemv_hfq4g256_rdna4"),
         _ => (GEMV_HFQ4G256_SRC, "gemv_hfq4g256"), // gfx1010 baseline
     }
 }
