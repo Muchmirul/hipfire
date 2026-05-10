@@ -1,0 +1,66 @@
+# autokernel-rdna configuration
+# Copy to config.toml and customize before running.
+# All values can be overridden by environment variables or CLI flags.
+
+[target]
+# GPU architecture to optimize for.
+# Use gfx1201 for Radeon RX 9070 XT (RDNA4 / Navi 48).
+arch = "gfx1201"
+
+# Allow-other-arch: set true to run on non-gfx1201 hardware (for testing).
+allow_other_arch = false
+
+[model]
+# Default model to benchmark. Used by baseline, profile, and orchestrate.
+name = "qwen3.5:9b"
+
+# Additional model for large-scale decode validation.
+large = "qwen3.5:27b"
+
+# Draft models for DFlash validation (used by coherence gate experiments).
+draft_small = "qwen3.5:9b-draft"
+draft_large = "qwen3.5:27b-draft"
+
+[benchmark]
+# Number of fresh-process trials to run per experiment.
+# Minimum 3 — results below 3 trials are rejected by the scheduler.
+trials = 3
+
+# Speedup noise threshold. A candidate must exceed baseline median by this
+# factor to be accepted. Calibrated for ±10-15% within-session noise per
+# docs/methodology/perf-benchmarking.md.
+speedup_threshold = 1.08
+
+# DPM warmup is built into bench_qwen35_mq4. Do not disable.
+# This flag controls whether the orchestrator adds an extra pre-bench warmup
+# pass for thermal stabilization (recommended for sustained runs).
+extra_warmup = false
+
+[paths]
+# Where hipfire models are stored. Defaults to ~/.hipfire/models.
+# Override with HIPFIRE_MODELS_DIR env var.
+# models_dir = "~/.hipfire/models"
+
+# Kernel cache directory. Defaults to ~/.hipfire/bin/kernels.
+# Override with HIPFIRE_KERNEL_CACHE env var.
+# kernel_cache = "~/.hipfire/bin/kernels"
+
+# Benchmark prompt to use for comparisons. Must be a committed file.
+# MD5 is recorded automatically.
+bench_prompt = "benchmarks/prompts/lru_cache_pep8_strict.txt"
+
+[gates]
+# Whether to run the coherence gate after kernel experiments.
+# Must be true for any kernel/dispatch/fusion change.
+coherence_gate = true
+
+# Whether to run the speed gate after successful experiments.
+speed_gate = true
+
+# Speed gate mode: "fast" (4B only, ~25s) or "full" (all sizes).
+speed_gate_mode = "fast"
+
+[logging]
+# Results are always appended to tools/autokernel-rdna/results.tsv.
+# Set verbose=true to also print full bench output on each trial.
+verbose = false
