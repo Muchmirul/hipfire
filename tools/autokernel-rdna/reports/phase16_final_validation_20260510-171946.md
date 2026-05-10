@@ -1,0 +1,108 @@
+# Phase 16 — Final End-to-End Validation Report
+
+**Decision: PASS_INFRA_ONLY**
+
+Generated: 2026-05-10T17:19:46Z
+
+---
+
+## Environment
+
+| Field | Value |
+|---|---|
+| Date | `2026-05-10T17:19:46Z` |
+| Host | `dev-MS-7C56` |
+| Git SHA | `9f03c2ccf5a3bf4af6542af136578f55b8281202` |
+| Dirty files | 34 |
+| GPU | 		0x7550 |
+| Arch (detected) | unknown |
+| Arch (requested) | gfx1201 |
+| ROCm | 7.2.1 |
+| Kernel | 6.17.0-23-generic |
+| Model | qwen3.5:27b |
+| Trials | 5 |
+
+## Pipeline Component Checklist
+
+| Component | Status |
+|---|---|
+| autokernel_loop.sh | ✓ present |
+| promote_kernel.sh | ✓ present |
+| phase11_validate.sh | ✓ present |
+| check_results_tsv.sh | ✓ present |
+| kernel_lab/ | ✓ present |
+| results.tsv | ✓ present |
+| workspace/ | ✓ present |
+| reports/ | ✓ present |
+
+## results.tsv Schema
+
+Status: **WARN**
+
+## Candidate and Promotion Records
+
+| | Count |
+|---|---|
+| Generated candidates | 7 |
+| Harness-passing | 0 |
+| Promoted (total attempts) | 4 |
+| Accepted promotions | 0 |
+| Rejected promotions | 4 |
+| Latest accepted | none |
+
+## hipfire Build
+
+**PASS**
+
+Build log: `/home/dev/hipfire-pr1-review/tools/autokernel-rdna/reports/phase16_build_20260510-171946.log`
+
+## Correctness Gates
+
+| Gate | Status |
+|---|---|
+| speed-gate.sh --fast | PASS |
+| coherence-gate-dflash.sh | SKIPPED |
+
+## Qwen3.5-27B Benchmark
+
+| | Value |
+|---|---|
+| Status | SKIPPED |
+| Model path | `not found` |
+| Prompt MD5 | `unknown` |
+| Trials | 5 |
+| Median tok/s | **0** |
+| Min tok/s | 0 |
+| Max tok/s | 0 |
+
+## Baseline Comparison
+
+| | Value |
+|---|---|
+| Baseline status | AVAILABLE |
+| Baseline source | /home/dev/hipfire-pr1-review/tools/autokernel-rdna/baselines/20260510-170740.json |
+| Baseline tok/s | 35.2 |
+| Final tok/s | 0 |
+| Delta | 0 tok/s |
+| Speedup | 0× |
+| Percent | 0% |
+| Speedup status | UNKNOWN |
+
+## Final Decision: PASS_INFRA_ONLY
+
+All infrastructure checks passed. No promoted kernel has improved tok/s yet — pipeline is ready for more candidates.
+
+## Known Limitations
+
+- No Qwen3.5-27B baseline exists in `tools/autokernel-rdna/baselines/` (all stored baselines are for 9b).
+- The bench binary writes all output to stderr; this is captured correctly.
+- DFlash draft is not required for this benchmark (spec-decode is a separate evaluation).
+- DDTree gfx1201 regression is expected and documented (see AGENTS.md §4).
+
+## Rollback Commands
+
+No accepted promotions to roll back.
+
+## Next Recommended Action
+
+Generate a 27B baseline: `ARCH=gfx1201 MODEL=qwen3.5:27b ./tools/autokernel-rdna/run.sh baseline`. Then run `AUTHOR_KERNEL=1 ./tools/autokernel-rdna/autokernel_loop.sh` overnight and promote passing candidates.

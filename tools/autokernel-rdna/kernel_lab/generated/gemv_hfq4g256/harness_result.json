@@ -1,0 +1,5 @@
+{
+  "correctness": "PASS",
+  "speedup_vs_ref": "1.2997",
+  "harness_output": "CORRECTNESS: PASS\nLATENCY_US: 15.78\nREF_LATENCY_US: 20.51\nSPEEDUP_VS_REF: 1.2997"
+}

@@ -1,0 +1,61 @@
+diff --git a/tools/autokernel-rdna/workspace/orchestration_state.json b/tools/autokernel-rdna/workspace/orchestration_state.json
+index a1cdbbb..a6138a1 100644
+--- a/tools/autokernel-rdna/workspace/orchestration_state.json
++++ b/tools/autokernel-rdna/workspace/orchestration_state.json
+@@ -1,8 +1,7 @@
+ {
+   "version": 1,
+-  "current_target": "gemv_hfq4g256",
++  "current_target": "gemv_hfq6g256",
+   "target_queue": [
+-    "gemv_hfq4g256",
+     "gemv_hfq6g256",
+     "gemv_hfq4g256_residual",
+     "gemv_hfq6g256_residual",
+@@ -10,19 +9,35 @@
+     "attention_flash_asym3_tile",
+     "fused_gate_up_hfq4g256",
+     "fused_rmsnorm_mq_rotate",
+-    "rmsnorm"
++    "rmsnorm",
++    "gemv_hfq4g256"
+   ],
+   "accepted_candidates": [],
+   "rejected_candidates": [],
+-  "best_tok_s": 0.0,
+-  "baseline_tok_s": 0.0,
+-  "best_speedup": 1.0,
+-  "attempts_per_target": {},
+-  "strategies_tried": {},
++  "best_tok_s": 0,
++  "baseline_tok_s": 93.1,
++  "best_speedup": 0.0,
++  "attempts_per_target": {
++    "gemv_hfq4g256": 5,
++    "gemv_hfq6g256": 2
++  },
++  "strategies_tried": {
++    "gemv_hfq4g256": [
++      "author_gemv_lds_staging_x",
++      "author_gemv_uint4_loads",
++      "author_gemv_8acc_ilp",
++      "author_gemv_scale_broadcast",
++      "author_gemv_prefetch_next_group"
++    ],
++    "gemv_hfq6g256": [
++      "author_gemv6_lds_staging_x",
++      "author_gemv6_uint4_loads"
++    ]
++  },
+   "crash_count": 0,
+   "timeout_count": 0,
+-  "plateau_count": 0,
+-  "last_decision": "INIT",
++  "plateau_count": 1,
++  "last_decision": "KEEP",
+   "next_action": "CONTINUE",
+-  "total_iterations": 0
+-}
++  "total_iterations": 2
++}
+\ No newline at end of file

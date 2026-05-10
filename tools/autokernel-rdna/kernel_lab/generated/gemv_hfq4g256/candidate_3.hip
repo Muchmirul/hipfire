@@ -3,13 +3,13 @@
 // ============================================================
 //
 // Target:    gemv_hfq4g256
-// Strategy:  author_gemv_prefetch_next_group
-// Iteration: 2
+// Strategy:  author_gemv_8acc_ilp
+// Iteration: 3
 // Arch:      gfx1201
-// Timestamp: 2026-05-10T15:49:30Z
+// Timestamp: 2026-05-10T15:48:11Z
 //
 // OBJECTIVE:
-// While computing dot product for group g, issue a prefetch hint for group g+1. Use __builtin_amdgcn_s_prefetch or __builtin_prefetch on the next group pointer. WARNING: Phase 10 showed this regresses on gfx1201 in the residual path — re-evaluate only for the base GEMV path with careful measurement. Do not use for _residual kernels.
+// Extend from 4 accumulators (acc0..acc3) to 8 (acc0..acc7) to expose more ILP to the gfx1201 scheduler. Process 8 groups per outer iteration instead of 4. The 4-accumulator combine at the end (warp shuffle sum) extends to 8 lanes. WARNING: preserve the tail group accumulator invariant: tail group g goes into acc[g % 8].
 //
 // RULES (do not violate or correctness gate will fail):
 //   1. Function name must remain: gemv_hfq4g256
@@ -21,7 +21,7 @@
 //   7. Tail accumulator invariant: tail group g must use acc[g % N_ACCUMULATORS]
 //
 // HOW TO TEST:
-//   CANDIDATE=/home/dev/hipfire-pr1-review//home/dev/hipfire-pr1-review/tools/autokernel-rdna/kernel_lab/generated/gemv_hfq4g256/candidate_2.hip \
+//   CANDIDATE=/home/dev/hipfire-pr1-review//home/dev/hipfire-pr1-review/tools/autokernel-rdna/kernel_lab/generated/gemv_hfq4g256/candidate_3.hip \
 //     bash tools/autokernel-rdna/kernel_lab/harnesses/gemv_hfq4g256_harness.sh
 //
 // HOW TO REVERT:

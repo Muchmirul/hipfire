@@ -3,13 +3,13 @@
 // ============================================================
 //
 // Target:    gemv_hfq6g256
-// Strategy:  author_gemv6_4acc_ilp
-// Iteration: 1
+// Strategy:  author_gemv6_uint4_loads
+// Iteration: 2
 // Arch:      gfx1201
-// Timestamp: 2026-05-10T17:17:33Z
+// Timestamp: 2026-05-10T15:50:42Z
 //
 // OBJECTIVE:
-// Custom strategy: author_gemv6_4acc_ilp. See kernel_lab/templates/hip_kernel_candidate.md for guidance.
+// Custom strategy: author_gemv6_uint4_loads. See kernel_lab/templates/hip_kernel_candidate.md for guidance.
 //
 // RULES (do not violate or correctness gate will fail):
 //   1. Function name must remain: gemv_hfq6g256
@@ -21,7 +21,7 @@
 //   7. Tail accumulator invariant: tail group g must use acc[g % N_ACCUMULATORS]
 //
 // HOW TO TEST:
-//   CANDIDATE=/home/dev/hipfire-pr1-review//home/dev/hipfire-pr1-review/tools/autokernel-rdna/kernel_lab/generated/gemv_hfq6g256/candidate_1.hip \
+//   CANDIDATE=/home/dev/hipfire-pr1-review//home/dev/hipfire-pr1-review/tools/autokernel-rdna/kernel_lab/generated/gemv_hfq6g256/candidate_2.hip \
 //     bash tools/autokernel-rdna/kernel_lab/harnesses/gemv_hfq6g256_harness.sh
 //
 // HOW TO REVERT:

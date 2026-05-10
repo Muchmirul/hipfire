@@ -3,13 +3,13 @@
 // ============================================================
 //
 // Target:    gemv_hfq4g256
-// Strategy:  author_gemv_prefetch_next_group
-// Iteration: 2
+// Strategy:  author_gemv_scale_broadcast
+// Iteration: 1
 // Arch:      gfx1201
-// Timestamp: 2026-05-10T15:49:30Z
+// Timestamp: 2026-05-10T15:49:28Z
 //
 // OBJECTIVE:
-// While computing dot product for group g, issue a prefetch hint for group g+1. Use __builtin_amdgcn_s_prefetch or __builtin_prefetch on the next group pointer. WARNING: Phase 10 showed this regresses on gfx1201 in the residual path — re-evaluate only for the base GEMV path with careful measurement. Do not use for _residual kernels.
+// In the current kernel each thread loads its own scale/zp from global memory (bytes 0-7 of the group). Since all 32 threads in the block process the same group and need the same scale/zp, use __shfl_sync / DS_BPERMUTE to load once per block (thread 0 loads) then broadcast. Saves 31 redundant global loads per group per block.
 //
 // RULES (do not violate or correctness gate will fail):
 //   1. Function name must remain: gemv_hfq4g256
@@ -21,7 +21,7 @@
 //   7. Tail accumulator invariant: tail group g must use acc[g % N_ACCUMULATORS]
 //
 // HOW TO TEST:
-//   CANDIDATE=/home/dev/hipfire-pr1-review//home/dev/hipfire-pr1-review/tools/autokernel-rdna/kernel_lab/generated/gemv_hfq4g256/candidate_2.hip \
+//   CANDIDATE=/home/dev/hipfire-pr1-review//home/dev/hipfire-pr1-review/tools/autokernel-rdna/kernel_lab/generated/gemv_hfq4g256/candidate_1.hip \
 //     bash tools/autokernel-rdna/kernel_lab/harnesses/gemv_hfq4g256_harness.sh
 //
 // HOW TO REVERT:
