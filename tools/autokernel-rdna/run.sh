@@ -552,11 +552,22 @@ cmd_experiment() {
 
     log "=== AutoKernel EXPERIMENT: $OPT_KERNEL on $OPT_ARCH ==="
 
-    # ── Load baseline ───────────────────────────────────────────────────
-    local baseline_json
-    baseline_json="$(ls -t "$BASELINES_DIR"/*.json 2>/dev/null | head -1 || true)"
+    # ── Load model-matched baseline ────────────────────────────────────
+    # Filter by OPT_MODEL size (e.g. 27b/9b) to avoid cross-model contamination.
+    local baseline_json=""
+    local _exp_model_size
+    _exp_model_size=$(echo "$OPT_MODEL" | grep -oP '\d+b' | head -1 || echo "")
+    while IFS= read -r _f; do
+        [[ -f "$_f" ]] || continue
+        local _bm
+        _bm=$(python3 -c "import json; print(json.load(open('$_f')).get('model',''))" 2>/dev/null || echo "")
+        if [[ -n "$_exp_model_size" && "$_bm" == *"$_exp_model_size"* ]]; then
+            baseline_json="$_f"
+            break
+        fi
+    done < <(ls -t "$BASELINES_DIR"/*.json 2>/dev/null)
     if [ -z "$baseline_json" ]; then
-        warn "No baseline found — running baseline first..."
+        warn "No model-matched baseline for $OPT_MODEL — running baseline first..."
         baseline_json="$(cmd_baseline)"
     fi
 
@@ -564,7 +575,7 @@ cmd_experiment() {
     baseline_decode=$(grep -oP '"baseline_decode_tok_s":\s*\K[\d.]+' "$baseline_json" || echo "0")
     baseline_prefill=$(grep -oP '"baseline_prefill_tok_s":\s*\K[\d.]+' "$baseline_json" || echo "0")
     baseline_vram=$(grep -oP '"vram_mb":\s*\K[\d.]+' "$baseline_json" || echo "0")
-    log "Baseline: decode=$baseline_decode prefill=$baseline_prefill vram=$baseline_vram MB"
+    log "Baseline ($OPT_MODEL): decode=$baseline_decode prefill=$baseline_prefill vram=$baseline_vram MB"
 
     # ── Git branch ──────────────────────────────────────────────────────
     local base_sha; base_sha="$(git_sha)"

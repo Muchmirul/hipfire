@@ -747,18 +747,33 @@ run_benchmark() {
     log_info "  Model: $model_path"
     require_file "$BENCH_PROMPT" "bench prompt"
 
-    # Load or measure baseline
-    local baseline_json
-    baseline_json=$(ls -t "$BASELINES_DIR"/*.json 2>/dev/null | head -1 || echo "")
+    # Load model-matched baseline — filter by MODEL size (27b/9b) to avoid
+    # cross-model contamination (e.g. loading a 9b baseline when running 27b bench).
+    local baseline_json=""
+    local _model_size
+    _model_size=$(echo "$MODEL" | grep -oP '\d+b' | head -1 || echo "")
+    while IFS= read -r _f; do
+        [[ -f "$_f" ]] || continue
+        local _bmodel
+        _bmodel=$(python3 -c "
+import json, sys
+try: print(json.load(open('$_f')).get('model',''))
+except: print('')" 2>/dev/null || echo "")
+        if [[ -n "$_model_size" && "$_bmodel" == *"$_model_size"* ]]; then
+            baseline_json="$_f"
+            break
+        fi
+    done < <(ls -t "$BASELINES_DIR"/*.json 2>/dev/null)
     if [ -n "$baseline_json" ] && [ -f "$baseline_json" ]; then
         BASELINE_TOK_S=$(python3 -c "
 import json
 d = json.load(open('$baseline_json'))
 v = d.get('baseline_decode_tok_s', d.get('gen_tok_s', d.get('decode_tok_s', 0)))
 print(v)" 2>/dev/null || echo "0")
-        log_info "  Baseline (cached): $BASELINE_TOK_S tok/s from $baseline_json"
+        log_info "  Baseline (model-matched $MODEL): $BASELINE_TOK_S tok/s from $baseline_json"
     else
-        log_info "  Measuring baseline tok/s..."
+        log_info "  No model-matched baseline for $MODEL — measuring fresh baseline..."
+        log_warn "  Tip: cache this with: ARCH=$ARCH MODEL=$MODEL ./tools/autokernel-rdna/run.sh baseline --allow-other-arch"
         BASELINE_TOK_S=$(run_bench "$model_path" "$BENCH_PROMPT")
         log_info "  Baseline: $BASELINE_TOK_S tok/s"
     fi
