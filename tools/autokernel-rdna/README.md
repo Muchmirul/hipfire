@@ -439,3 +439,66 @@ Compare `gen_tok_s` to the baseline in `tools/autokernel-rdna/baselines/`.
 - Never overwrite fallback without backup.
 - Correctness is a hard gate — fast-but-wrong = FAIL_REVERTED.
 - Do not alter the benchmark evaluator to make candidates pass.
+
+---
+
+## Phase 16 — Final Validate
+
+Validates the complete AutoKernel adoption end-to-end and produces a proof package.
+
+### Quick run commands
+
+```bash
+# Short validation (3 trials, skip coherence gate):
+ARCH=gfx1201 MODEL=qwen3.5:27b TRIALS=3 SKIP_COHERENCE=1 \
+  ./tools/autokernel-rdna/final_validate.sh
+
+# Full validation (5 trials, all gates):
+ARCH=gfx1201 MODEL=qwen3.5:27b TRIALS=5 \
+  ./tools/autokernel-rdna/final_validate.sh
+
+# Overnight optimization loop (generates new candidates):
+AUTHOR_KERNEL=1 ARCH=gfx1201 MODEL=qwen3.5:27b MAX_ITERS=50 \
+  ./tools/autokernel-rdna/autokernel_loop.sh
+
+# Author one kernel manually:
+TARGET=gemv_hfq4g256 ARCH=gfx1201 \
+  ./tools/autokernel-rdna/author_kernel.sh
+
+# Promote a verified candidate:
+ARCH=gfx1201 MODEL=qwen3.5:27b \
+  CANDIDATE=tools/autokernel-rdna/kernel_lab/generated/gemv_hfq4g256/candidate_1.hip \
+  ./tools/autokernel-rdna/promote_kernel.sh
+```
+
+### Decision meanings
+
+| Decision | Meaning |
+|---|---|
+| `PASS_ADOPTED` | All gates pass. ≥1 kernel promoted and verified to improve Qwen3.5-27B tok/s. Safe to ship. |
+| `PASS_INFRA_ONLY` | All gates pass. No kernel has improved tok/s yet. Pipeline ready for more candidates. |
+| `NEEDS_BASELINE` | Infrastructure and validation pass, but no 27B baseline for comparison. Measure a baseline first. |
+| `FAIL` | At least one hard gate failed (build / correctness / benchmark). Do not claim adoption. |
+
+### Rollback
+
+```bash
+# Find backup dirs:
+ls tools/autokernel-rdna/workspace/promotion_backups/
+
+# Restore from backup (replace <timestamp>):
+DEST=$(cat tools/autokernel-rdna/workspace/promotion_backups/<timestamp>/promoted_dest.txt)
+BAK=tools/autokernel-rdna/workspace/promotion_backups/<timestamp>/$(basename "$DEST").bak
+cp "$BAK" "$DEST"
+
+# Rebuild:
+cargo build --release --features deltanet --example bench_qwen35_mq4 -p hipfire-runtime
+```
+
+### Qwen3.5-27B as proof target
+
+The canonical proof of AutoKernel adoption is Qwen3.5-27B tok/s on gfx1201 without accuracy loss.
+A `PASS_ADOPTED` result requires:
+- ≥1 accepted promotion in `workspace/accepted_promotions/`
+- `hipfire_speedup ≥ 1.005` in results.tsv for that promotion
+- `coherence-gate-dflash.sh` and `speed-gate.sh --fast` both passing
