@@ -7,7 +7,9 @@ use hip_bridge::{DeviceBuffer, HipResult, HipRuntime, Rocblas};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Per-group byte size of the MQ3-Lloyd quantization layout.
 ///
@@ -96,6 +98,408 @@ fn gemv_prefetch_enabled(arch: &str) -> bool {
         })
     });
     override_.unwrap_or(arch == "gfx906")
+}
+
+fn parse_bool_env(raw: &str) -> Option<bool> {
+    match raw {
+        "1" | "true" | "TRUE" | "on" | "ON" => Some(true),
+        "0" | "false" | "FALSE" | "off" | "OFF" => Some(false),
+        _ => None,
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DecodeBackend {
+    Native,
+    Autokernel,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DecodeBackendMode {
+    Force(DecodeBackend),
+    Auto,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DecodeAutotuneState {
+    decided: Option<DecodeBackend>,
+    warmup_calls: u32,
+    switch_count: u32,
+    native_samples: u32,
+    autokernel_samples: u32,
+    native_total_ns: u128,
+    autokernel_total_ns: u128,
+}
+
+fn decode_backend_from_bool(v: bool) -> DecodeBackend {
+    if v { DecodeBackend::Autokernel } else { DecodeBackend::Native }
+}
+
+fn decode_backend_mode_from_env() -> DecodeBackendMode {
+    match std::env::var("HIPFIRE_AUTOKERNEL_DECODE").ok() {
+        Some(v) if v.eq_ignore_ascii_case("auto") => DecodeBackendMode::Auto,
+        Some(v) => match parse_bool_env(&v) {
+            Some(force) => DecodeBackendMode::Force(decode_backend_from_bool(force)),
+            None => DecodeBackendMode::Auto,
+        },
+        None => DecodeBackendMode::Auto,
+    }
+}
+
+fn decode_autotune_enabled_for_arch(arch: &str) -> bool {
+    if !arch.starts_with("gfx12") {
+        return false;
+    }
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_TUNE")
+            .ok()
+            .as_deref()
+            .and_then(parse_bool_env)
+            .unwrap_or(true)
+    })
+}
+
+fn decode_autotune_samples_per_backend() -> u32 {
+    static CACHE: OnceLock<u32> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_TUNE_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(8)
+    })
+}
+
+fn decode_autotune_warmup_tokens() -> u32 {
+    static CACHE: OnceLock<u32> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_WARMUP_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(32)
+    })
+}
+
+fn decode_autotune_switch_pct() -> f64 {
+    static CACHE: OnceLock<f64> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_SWITCH_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|&v| v >= 0.0)
+            .unwrap_or(2.5)
+    })
+}
+
+fn hipfire_home_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("HIPFIRE_HOME") {
+        return Some(PathBuf::from(v));
+    }
+    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".hipfire"))
+}
+
+fn decode_backend_cache_path() -> Option<PathBuf> {
+    hipfire_home_dir().map(|p| p.join("cache").join("autokernel").join("decode_backends_v2.tsv"))
+}
+
+fn load_persisted_decode_backends() -> HashMap<String, DecodeBackend> {
+    let Some(path) = decode_backend_cache_path() else { return HashMap::new(); };
+    let Ok(s) = std::fs::read_to_string(path) else { return HashMap::new(); };
+    let mut map = HashMap::new();
+    for line in s.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let Some(key) = parts.next() else { continue; };
+        let Some(v) = parts.next() else { continue; };
+        let backend = match v {
+            "native" => Some(DecodeBackend::Native),
+            "autokernel" => Some(DecodeBackend::Autokernel),
+            _ => None,
+        };
+        if let Some(b) = backend {
+            map.insert(key.to_string(), b);
+        }
+    }
+    map
+}
+
+fn store_persisted_decode_backends(map: &HashMap<String, DecodeBackend>) {
+    let Some(path) = decode_backend_cache_path() else { return; };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("[hipfire] autokernel tuner: failed to create cache dir: {}", e);
+            return;
+        }
+    }
+    let mut rows: Vec<(&String, &DecodeBackend)> = map.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    let mut value = String::new();
+    for (k, b) in rows {
+        let backend_s = match b {
+            DecodeBackend::Native => "native",
+            DecodeBackend::Autokernel => "autokernel",
+        };
+        value.push_str(k);
+        value.push('\t');
+        value.push_str(backend_s);
+        value.push('\n');
+    }
+    if let Err(e) = std::fs::write(path, value) {
+        eprintln!("[hipfire] autokernel tuner: failed to write cache: {}", e);
+    }
+}
+
+fn persisted_decode_backends() -> &'static Mutex<HashMap<String, DecodeBackend>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, DecodeBackend>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(load_persisted_decode_backends()))
+}
+
+fn decode_shape_bucket(v: usize) -> usize {
+    const B: usize = 128;
+    if v == 0 {
+        0
+    } else {
+        ((v + B - 1) / B) * B
+    }
+}
+
+fn decode_shape_key_kv(arch: &str, n_kv_heads: usize, head_dim: usize) -> String {
+    format!(
+        "op=kv_asym3;arch={};nkv={};hd={}",
+        arch, n_kv_heads, head_dim,
+    )
+}
+
+fn decode_shape_key_attn(
+    arch: &str,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    max_seq: usize,
+) -> String {
+    format!(
+        "op=attn_asym3;arch={};nh={};nkv={};hd={};maxb={}",
+        arch,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        decode_shape_bucket(max_seq),
+    )
+}
+
+fn decode_autotune_states() -> &'static Mutex<HashMap<String, DecodeAutotuneState>> {
+    static STATES: OnceLock<Mutex<HashMap<String, DecodeAutotuneState>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pick_backend_with_hysteresis(
+    prior: Option<DecodeBackend>,
+    native_samples: u32,
+    native_total_ns: u128,
+    autokernel_samples: u32,
+    autokernel_total_ns: u128,
+) -> DecodeBackend {
+    let default_backend = prior.unwrap_or(DecodeBackend::Native);
+    if native_samples == 0 || autokernel_samples == 0 {
+        return default_backend;
+    }
+
+    let native_avg = native_total_ns as f64 / native_samples as f64;
+    let autokernel_avg = autokernel_total_ns as f64 / autokernel_samples as f64;
+    let pct = decode_autotune_switch_pct() / 100.0;
+
+    if autokernel_avg < native_avg * (1.0 - pct) {
+        DecodeBackend::Autokernel
+    } else if native_avg < autokernel_avg * (1.0 - pct) {
+        DecodeBackend::Native
+    } else {
+        default_backend
+    }
+}
+
+fn finalize_decode_backend(shape_key: &str, arch: &str, state: &mut DecodeAutotuneState) {
+    if state.decided.is_some() {
+        return;
+    }
+
+    let winner = pick_backend_with_hysteresis(
+        state.decided,
+        state.native_samples,
+        state.native_total_ns,
+        state.autokernel_samples,
+        state.autokernel_total_ns,
+    );
+    state.decided = Some(winner);
+
+    {
+        let mut persisted = persisted_decode_backends()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = persisted.insert(shape_key.to_string(), winner) {
+            if prev != winner {
+                state.switch_count += 1;
+                let prev_s = if prev == DecodeBackend::Autokernel { "autokernel" } else { "native" };
+                let new_s = if winner == DecodeBackend::Autokernel { "autokernel" } else { "native" };
+                eprintln!(
+                    "[hipfire] autokernel tuner: switch {} -> {} key={} switch_count={}",
+                    prev_s,
+                    new_s,
+                    shape_key,
+                    state.switch_count,
+                );
+            }
+        }
+        store_persisted_decode_backends(&persisted);
+    }
+
+    let winner_s = if winner == DecodeBackend::Autokernel { "autokernel" } else { "native" };
+    let native_avg = if state.native_samples > 0 {
+        state.native_total_ns / state.native_samples as u128
+    } else {
+        0
+    };
+    let autokernel_avg = if state.autokernel_samples > 0 {
+        state.autokernel_total_ns / state.autokernel_samples as u128
+    } else {
+        0
+    };
+    eprintln!(
+        "[hipfire] autokernel tuner: selected {} on {} key={} (native_avg={}us, autokernel_avg={}us, samples=n{} a{}, switch_pct={}%, warmup_calls={}, switches={})",
+        winner_s,
+        arch,
+        shape_key,
+        native_avg / 1_000,
+        autokernel_avg / 1_000,
+        state.native_samples,
+        state.autokernel_samples,
+        decode_autotune_switch_pct(),
+        state.warmup_calls,
+        state.switch_count,
+    );
+}
+
+fn select_decode_backend(shape_key: &str, arch: &str) -> (DecodeBackend, bool) {
+    match decode_backend_mode_from_env() {
+        DecodeBackendMode::Force(b) => return (b, false),
+        DecodeBackendMode::Auto => {}
+    }
+
+    if !decode_autotune_enabled_for_arch(arch) {
+        return (DecodeBackend::Native, false);
+    }
+
+    let mut states = decode_autotune_states()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let state = states.entry(shape_key.to_string()).or_insert_with(|| {
+        let persisted = persisted_decode_backends()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(shape_key)
+            .copied();
+        DecodeAutotuneState {
+            decided: persisted,
+            ..DecodeAutotuneState::default()
+        }
+    });
+
+    if let Some(b) = state.decided {
+        return (b, false);
+    }
+
+    let warmup = decode_autotune_warmup_tokens();
+    if state.warmup_calls >= warmup {
+        finalize_decode_backend(shape_key, arch, state);
+        return (state.decided.unwrap_or(DecodeBackend::Native), false);
+    }
+
+    state.warmup_calls += 1;
+
+    let next = if state.native_samples <= state.autokernel_samples {
+        DecodeBackend::Native
+    } else {
+        DecodeBackend::Autokernel
+    };
+    (next, true)
+}
+
+fn record_decode_backend_sample(shape_key: &str, arch: &str, backend: DecodeBackend, elapsed: Duration) {
+    if !decode_autotune_enabled_for_arch(arch) {
+        return;
+    }
+
+    let mut states = decode_autotune_states()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let state = states.entry(shape_key.to_string()).or_insert_with(|| {
+        let persisted = persisted_decode_backends()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(shape_key)
+            .copied();
+        DecodeAutotuneState {
+            decided: persisted,
+            ..DecodeAutotuneState::default()
+        }
+    });
+    if state.decided.is_some() {
+        return;
+    }
+
+    let ns = elapsed.as_nanos();
+    match backend {
+        DecodeBackend::Native => {
+            state.native_samples += 1;
+            state.native_total_ns += ns;
+        }
+        DecodeBackend::Autokernel => {
+            state.autokernel_samples += 1;
+            state.autokernel_total_ns += ns;
+        }
+    }
+
+    let need = decode_autotune_samples_per_backend();
+    let warmup = decode_autotune_warmup_tokens();
+    let enough_samples = state.native_samples >= need && state.autokernel_samples >= need;
+    let warmup_done = state.warmup_calls >= warmup;
+    if !enough_samples && !warmup_done {
+        return;
+    }
+
+    finalize_decode_backend(shape_key, arch, state);
+}
+
+fn log_decode_backend_once(arch: &str, backend: DecodeBackend, tuning: bool) {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    if LOGGED.set(()).is_ok() {
+        if tuning {
+            eprintln!(
+                "[hipfire] decode backend: autotune probing on {} (set HIPFIRE_AUTOKERNEL_DECODE=0|1 to force)",
+                arch,
+            );
+        } else if backend == DecodeBackend::Autokernel {
+            eprintln!("[hipfire] decode backend: autokernel (asym3 KV fast path)");
+        } else {
+            eprintln!("[hipfire] decode backend: native (set HIPFIRE_AUTOKERNEL_DECODE=1 for autokernel asym3 path)");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bool_env;
+
+    #[test]
+    fn parse_bool_env_accepts_expected_values() {
+        assert_eq!(parse_bool_env("1"), Some(true));
+        assert_eq!(parse_bool_env("true"), Some(true));
+        assert_eq!(parse_bool_env("on"), Some(true));
+        assert_eq!(parse_bool_env("0"), Some(false));
+        assert_eq!(parse_bool_env("false"), Some(false));
+        assert_eq!(parse_bool_env("off"), Some(false));
+        assert_eq!(parse_bool_env("maybe"), None);
+    }
 }
 
 /// Per-arch default R for the multi-row HFQ4 GEMV kernel family.
@@ -11957,6 +12361,64 @@ impl Gpu {
         n_kv_heads: usize, head_dim: usize,
     ) -> HipResult<()> {
         self.bind_thread()?;
+        let decode_shape = decode_shape_key_kv(&self.arch, n_kv_heads, head_dim);
+        let (decode_backend, tune_measure) = select_decode_backend(&decode_shape, &self.arch);
+        log_decode_backend_once(&self.arch, decode_backend, tune_measure);
+        let tune_start = if tune_measure {
+            self.hip.device_synchronize()?;
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        if decode_backend == DecodeBackend::Autokernel {
+            self.ensure_givens4_kernel(
+                "kv_cache_write_asym_k_givens3",
+                kernels::KV_CACHE_WRITE_ASYM_K_GIVENS3_SRC,
+                "kv_cache_write_asym_k_givens3",
+            )?;
+            {
+                let kdp = k_dst.buf.as_ptr();
+                let ksp = k_src.buf.as_ptr();
+                let pp = pos_buf.as_ptr();
+                let ctp = cos_theta.buf.as_ptr();
+                let stp = sin_theta.buf.as_ptr();
+                let nkv = n_kv_heads as i32;
+                let hd = head_dim as i32;
+                let mut params: Vec<*mut c_void> = vec![
+                    &kdp as *const _ as *mut c_void,
+                    &ksp as *const _ as *mut c_void,
+                    &pp as *const _ as *mut c_void,
+                    &ctp as *const _ as *mut c_void,
+                    &stp as *const _ as *mut c_void,
+                    &nkv as *const _ as *mut c_void,
+                    &hd as *const _ as *mut c_void,
+                ];
+                // +32 float lanes for reduction scratch (one wave) to match the
+                // native asym3 K-writer LDS layout.
+                let shared_mem = ((head_dim + 32) * 4) as u32;
+                self.launch_maybe_blob(
+                    "kv_cache_write_asym_k_givens3",
+                    [n_kv_heads as u32, 1, 1],
+                    [32, 1, 1],
+                    shared_mem,
+                    &mut params,
+                    || {
+                        let mut b = hip_bridge::KernargBlob::new();
+                        b.push_ptr(kdp); b.push_ptr(ksp); b.push_ptr(pp);
+                        b.push_ptr(ctp); b.push_ptr(stp);
+                        b.push_i32(nkv); b.push_i32(hd);
+                        b
+                    },
+                )?;
+            }
+            let result = self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
+            if let Some(start) = tune_start {
+                self.hip.device_synchronize()?;
+                record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
+            }
+            return result;
+        }
         self.ensure_givens4_kernel(
             "kv_cache_write_asym_k_givens3",
             kernels::KV_CACHE_WRITE_ASYM_K_GIVENS3_SRC,
@@ -11988,7 +12450,12 @@ impl Gpu {
                 )?;
             }
         }
-        self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim)
+        let result = self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
+        if let Some(start) = tune_start {
+            self.hip.device_synchronize()?;
+            record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
+        }
+        result
     }
 
     /// Shared helper: launch a batched K-only rotated write kernel.
@@ -12391,10 +12858,126 @@ impl Gpu {
         partials: &GpuTensor,
     ) -> HipResult<()> {
         self.bind_thread()?;
+        let decode_shape = decode_shape_key_attn(
+            &self.arch,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            max_seq,
+        );
+        let (decode_backend, tune_measure) = select_decode_backend(&decode_shape, &self.arch);
+        log_decode_backend_once(&self.arch, decode_backend, tune_measure);
+        let tune_start = if tune_measure {
+            self.hip.device_synchronize()?;
+            Some(Instant::now())
+        } else {
+            None
+        };
         const TILE_SIZE: usize = 128;
         let max_tiles = (max_seq + TILE_SIZE - 1) / TILE_SIZE;
         let actual_tiles = (seq_len_hint + TILE_SIZE - 1) / TILE_SIZE;
         let launch_tiles = if self.capture_mode { max_tiles } else { actual_tiles };
+
+        if decode_backend == DecodeBackend::Autokernel {
+            self.ensure_givens4_kernel(
+                "attention_flash_asym3_tile",
+                kernels::ATTENTION_FLASH_ASYM3_TILE_SRC,
+                "attention_flash_asym3_tile",
+            )?;
+            {
+                let q_ptr = q.buf.as_ptr();
+                let k_ptr = k_cache.buf.as_ptr();
+                let v_ptr = v_cache.buf.as_ptr();
+                let p_ptr = partials.buf.as_ptr();
+                let pos_ptr = pos_buf.as_ptr();
+                let ct_ptr = cos_theta.buf.as_ptr();
+                let st_ptr = sin_theta.buf.as_ptr();
+                let nh = n_heads as i32;
+                let nkv = n_kv_heads as i32;
+                let hd = head_dim as i32;
+                let ms = max_seq as i32;
+                let sc = 1.0f32 / (head_dim as f32).sqrt();
+                let ts = TILE_SIZE as i32;
+                let mt = max_tiles as i32;
+                let mut params: Vec<*mut c_void> = vec![
+                    &q_ptr as *const _ as *mut c_void,
+                    &k_ptr as *const _ as *mut c_void,
+                    &v_ptr as *const _ as *mut c_void,
+                    &p_ptr as *const _ as *mut c_void,
+                    &pos_ptr as *const _ as *mut c_void,
+                    &ct_ptr as *const _ as *mut c_void,
+                    &st_ptr as *const _ as *mut c_void,
+                    &nh as *const _ as *mut c_void,
+                    &nkv as *const _ as *mut c_void,
+                    &hd as *const _ as *mut c_void,
+                    &ms as *const _ as *mut c_void,
+                    &sc as *const _ as *mut c_void,
+                    &ts as *const _ as *mut c_void,
+                    &mt as *const _ as *mut c_void,
+                ];
+                self.launch_maybe_blob(
+                    "attention_flash_asym3_tile",
+                    [n_heads as u32, launch_tiles as u32, 1],
+                    [32, 1, 1],
+                    // scores[tile_size] as f32.
+                    (TILE_SIZE * 4) as u32,
+                    &mut params,
+                    || {
+                        let mut b = hip_bridge::KernargBlob::new();
+                        b.push_ptr(q_ptr); b.push_ptr(k_ptr); b.push_ptr(v_ptr);
+                        b.push_ptr(p_ptr); b.push_ptr(pos_ptr);
+                        b.push_ptr(ct_ptr); b.push_ptr(st_ptr);
+                        b.push_i32(nh); b.push_i32(nkv); b.push_i32(hd); b.push_i32(ms);
+                        b.push_f32(sc); b.push_i32(ts); b.push_i32(mt);
+                        b
+                    },
+                )?;
+            }
+
+            self.ensure_kernel(
+                "attention_flash_q8_0_reduce",
+                kernels::ATTENTION_FLASH_Q8_0_REDUCE_SRC,
+                "attention_flash_q8_0_reduce",
+            )?;
+            {
+                let p_ptr = partials.buf.as_ptr();
+                let o_ptr = out.buf.as_ptr();
+                let nh = n_heads as i32;
+                let hd = head_dim as i32;
+                let pos_ptr = pos_buf.as_ptr();
+                let ts = TILE_SIZE as i32;
+                let mt = max_tiles as i32;
+                let mut params: Vec<*mut c_void> = vec![
+                    &p_ptr as *const _ as *mut c_void,
+                    &o_ptr as *const _ as *mut c_void,
+                    &nh as *const _ as *mut c_void,
+                    &hd as *const _ as *mut c_void,
+                    &pos_ptr as *const _ as *mut c_void,
+                    &ts as *const _ as *mut c_void,
+                    &mt as *const _ as *mut c_void,
+                ];
+                self.launch_maybe_blob(
+                    "attention_flash_q8_0_reduce",
+                    [n_heads as u32, 1, 1],
+                    [32, 1, 1],
+                    0,
+                    &mut params,
+                    || {
+                        let mut b = hip_bridge::KernargBlob::new();
+                        b.push_ptr(p_ptr); b.push_ptr(o_ptr);
+                        b.push_i32(nh); b.push_i32(hd);
+                        b.push_ptr(pos_ptr);
+                        b.push_i32(ts); b.push_i32(mt);
+                        b
+                    },
+                )?;
+            }
+            if let Some(start) = tune_start {
+                self.hip.device_synchronize()?;
+                record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
+            }
+            return Ok(());
+        }
 
         self.ensure_givens4_kernel(
             "attention_flash_asym3_tile",
@@ -12472,6 +13055,10 @@ impl Gpu {
                     self.stream_ref(), &mut params,
                 )?;
             }
+        }
+        if let Some(start) = tune_start {
+            self.hip.device_synchronize()?;
+            record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
         }
         Ok(())
     }
