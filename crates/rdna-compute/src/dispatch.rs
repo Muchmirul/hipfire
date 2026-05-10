@@ -7,7 +7,9 @@ use hip_bridge::{DeviceBuffer, HipResult, HipRuntime, Rocblas};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Per-group byte size of the MQ3-Lloyd quantization layout.
 ///
@@ -106,21 +108,202 @@ fn parse_bool_env(raw: &str) -> Option<bool> {
     }
 }
 
-fn autokernel_decode_enabled() -> bool {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DecodeBackend {
+    Native,
+    Autokernel,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DecodeBackendMode {
+    Force(DecodeBackend),
+    Auto,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DecodeAutotuneState {
+    decided: Option<DecodeBackend>,
+    native_samples: u32,
+    autokernel_samples: u32,
+    native_total_ns: u128,
+    autokernel_total_ns: u128,
+}
+
+fn decode_backend_from_bool(v: bool) -> DecodeBackend {
+    if v { DecodeBackend::Autokernel } else { DecodeBackend::Native }
+}
+
+fn decode_backend_mode_from_env() -> DecodeBackendMode {
+    match std::env::var("HIPFIRE_AUTOKERNEL_DECODE").ok() {
+        Some(v) if v.eq_ignore_ascii_case("auto") => DecodeBackendMode::Auto,
+        Some(v) => match parse_bool_env(&v) {
+            Some(force) => DecodeBackendMode::Force(decode_backend_from_bool(force)),
+            None => DecodeBackendMode::Auto,
+        },
+        None => DecodeBackendMode::Auto,
+    }
+}
+
+fn decode_autotune_enabled_for_arch(arch: &str) -> bool {
+    if !arch.starts_with("gfx12") {
+        return false;
+    }
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        std::env::var("HIPFIRE_AUTOKERNEL_DECODE")
+        std::env::var("HIPFIRE_AUTOKERNEL_TUNE")
             .ok()
             .as_deref()
             .and_then(parse_bool_env)
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
-fn log_decode_backend_once() {
+fn decode_autotune_samples_per_backend() -> u32 {
+    static CACHE: OnceLock<u32> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_TUNE_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(6)
+    })
+}
+
+fn hipfire_home_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("HIPFIRE_HOME") {
+        return Some(PathBuf::from(v));
+    }
+    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".hipfire"))
+}
+
+fn decode_backend_cache_path(arch: &str) -> Option<PathBuf> {
+    hipfire_home_dir().map(|p| p.join("cache").join("autokernel").join(format!("decode_backend_{}.txt", arch)))
+}
+
+fn load_persisted_decode_backend(arch: &str) -> Option<DecodeBackend> {
+    let path = decode_backend_cache_path(arch)?;
+    let s = std::fs::read_to_string(path).ok()?;
+    match s.trim() {
+        "native" => Some(DecodeBackend::Native),
+        "autokernel" => Some(DecodeBackend::Autokernel),
+        _ => None,
+    }
+}
+
+fn store_persisted_decode_backend(arch: &str, backend: DecodeBackend) {
+    let Some(path) = decode_backend_cache_path(arch) else { return; };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("[hipfire] autokernel tuner: failed to create cache dir: {}", e);
+            return;
+        }
+    }
+    let value = match backend {
+        DecodeBackend::Native => "native\n",
+        DecodeBackend::Autokernel => "autokernel\n",
+    };
+    if let Err(e) = std::fs::write(path, value) {
+        eprintln!("[hipfire] autokernel tuner: failed to write cache: {}", e);
+    }
+}
+
+fn decode_autotune_states() -> &'static Mutex<HashMap<String, DecodeAutotuneState>> {
+    static STATES: OnceLock<Mutex<HashMap<String, DecodeAutotuneState>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn select_decode_backend(arch: &str) -> (DecodeBackend, bool) {
+    match decode_backend_mode_from_env() {
+        DecodeBackendMode::Force(b) => return (b, false),
+        DecodeBackendMode::Auto => {}
+    }
+
+    if !decode_autotune_enabled_for_arch(arch) {
+        return (DecodeBackend::Native, false);
+    }
+
+    let mut states = decode_autotune_states()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let state = states.entry(arch.to_string()).or_insert_with(|| DecodeAutotuneState {
+        decided: load_persisted_decode_backend(arch),
+        ..DecodeAutotuneState::default()
+    });
+
+    if let Some(b) = state.decided {
+        return (b, false);
+    }
+
+    let next = if state.native_samples <= state.autokernel_samples {
+        DecodeBackend::Native
+    } else {
+        DecodeBackend::Autokernel
+    };
+    (next, true)
+}
+
+fn record_decode_backend_sample(arch: &str, backend: DecodeBackend, elapsed: Duration) {
+    if !decode_autotune_enabled_for_arch(arch) {
+        return;
+    }
+
+    let mut states = decode_autotune_states()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let state = states.entry(arch.to_string()).or_insert_with(|| DecodeAutotuneState {
+        decided: load_persisted_decode_backend(arch),
+        ..DecodeAutotuneState::default()
+    });
+    if state.decided.is_some() {
+        return;
+    }
+
+    let ns = elapsed.as_nanos();
+    match backend {
+        DecodeBackend::Native => {
+            state.native_samples += 1;
+            state.native_total_ns += ns;
+        }
+        DecodeBackend::Autokernel => {
+            state.autokernel_samples += 1;
+            state.autokernel_total_ns += ns;
+        }
+    }
+
+    let need = decode_autotune_samples_per_backend();
+    if state.native_samples < need || state.autokernel_samples < need {
+        return;
+    }
+
+    let native_avg = state.native_total_ns / state.native_samples as u128;
+    let autokernel_avg = state.autokernel_total_ns / state.autokernel_samples as u128;
+    let winner = if autokernel_avg < native_avg {
+        DecodeBackend::Autokernel
+    } else {
+        DecodeBackend::Native
+    };
+    state.decided = Some(winner);
+    store_persisted_decode_backend(arch, winner);
+    let winner_s = if winner == DecodeBackend::Autokernel { "autokernel" } else { "native" };
+    eprintln!(
+        "[hipfire] autokernel tuner: selected {} on {} (native_avg={}us, autokernel_avg={}us, samples={} each)",
+        winner_s,
+        arch,
+        native_avg / 1_000,
+        autokernel_avg / 1_000,
+        need,
+    );
+}
+
+fn log_decode_backend_once(arch: &str, backend: DecodeBackend, tuning: bool) {
     static LOGGED: OnceLock<()> = OnceLock::new();
     if LOGGED.set(()).is_ok() {
-        if autokernel_decode_enabled() {
+        if tuning {
+            eprintln!(
+                "[hipfire] decode backend: autotune probing on {} (set HIPFIRE_AUTOKERNEL_DECODE=0|1 to force)",
+                arch,
+            );
+        } else if backend == DecodeBackend::Autokernel {
             eprintln!("[hipfire] decode backend: autokernel (asym3 KV fast path)");
         } else {
             eprintln!("[hipfire] decode backend: native (set HIPFIRE_AUTOKERNEL_DECODE=1 for autokernel asym3 path)");
@@ -12003,8 +12186,16 @@ impl Gpu {
         n_kv_heads: usize, head_dim: usize,
     ) -> HipResult<()> {
         self.bind_thread()?;
-        log_decode_backend_once();
-        if autokernel_decode_enabled() {
+        let (decode_backend, tune_measure) = select_decode_backend(&self.arch);
+        log_decode_backend_once(&self.arch, decode_backend, tune_measure);
+        let tune_start = if tune_measure {
+            self.hip.device_synchronize()?;
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        if decode_backend == DecodeBackend::Autokernel {
             self.ensure_givens4_kernel(
                 "kv_cache_write_asym_k_givens3",
                 kernels::KV_CACHE_WRITE_ASYM_K_GIVENS3_SRC,
@@ -12045,7 +12236,12 @@ impl Gpu {
                     },
                 )?;
             }
-            return self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
+            let result = self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
+            if let Some(start) = tune_start {
+                self.hip.device_synchronize()?;
+                record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
+            }
+            return result;
         }
         self.ensure_givens4_kernel(
             "kv_cache_write_asym_k_givens3",
@@ -12078,7 +12274,12 @@ impl Gpu {
                 )?;
             }
         }
-        self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim)
+        let result = self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
+        if let Some(start) = tune_start {
+            self.hip.device_synchronize()?;
+            record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
+        }
+        result
     }
 
     /// Shared helper: launch a batched K-only rotated write kernel.
@@ -12481,13 +12682,20 @@ impl Gpu {
         partials: &GpuTensor,
     ) -> HipResult<()> {
         self.bind_thread()?;
-        log_decode_backend_once();
+        let (decode_backend, tune_measure) = select_decode_backend(&self.arch);
+        log_decode_backend_once(&self.arch, decode_backend, tune_measure);
+        let tune_start = if tune_measure {
+            self.hip.device_synchronize()?;
+            Some(Instant::now())
+        } else {
+            None
+        };
         const TILE_SIZE: usize = 128;
         let max_tiles = (max_seq + TILE_SIZE - 1) / TILE_SIZE;
         let actual_tiles = (seq_len_hint + TILE_SIZE - 1) / TILE_SIZE;
         let launch_tiles = if self.capture_mode { max_tiles } else { actual_tiles };
 
-        if autokernel_decode_enabled() {
+        if decode_backend == DecodeBackend::Autokernel {
             self.ensure_givens4_kernel(
                 "attention_flash_asym3_tile",
                 kernels::ATTENTION_FLASH_ASYM3_TILE_SRC,
@@ -12581,6 +12789,10 @@ impl Gpu {
                     },
                 )?;
             }
+            if let Some(start) = tune_start {
+                self.hip.device_synchronize()?;
+                record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
+            }
             return Ok(());
         }
 
@@ -12660,6 +12872,10 @@ impl Gpu {
                     self.stream_ref(), &mut params,
                 )?;
             }
+        }
+        if let Some(start) = tune_start {
+            self.hip.device_synchronize()?;
+            record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
         }
         Ok(())
     }
