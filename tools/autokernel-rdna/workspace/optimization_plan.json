@@ -1,0 +1,159 @@
+{
+  "_comment": "AutoKernel optimization plan — Qwen3.5-27B decode on gfx1201 (RDNA4).",
+  "_note": "Targets ordered by Amdahl decode impact. Update after each accepted candidate.",
+  "generated": "2026-05-10T00:00:00Z",
+  "arch": "gfx1201",
+  "model": "qwen3.5:27b",
+  "amdahl_formula": "e2e_speedup = 1 / ((1 - f) + f / s)  where f=decode_fraction, s=kernel_speedup",
+  "targets": [
+    {
+      "target": "gemv_hfq4g256",
+      "reason_selected": "20% of decode cycles (Amdahl #1). 1.3x on this kernel = 1.055x end-to-end. Phase 12 confirmed bandwidth ceiling at 8x unroll; launch-bounds / occupancy tuning unexplored.",
+      "estimated_runtime_share": 0.20,
+      "expected_speedup_potential": 1.055,
+      "candidate_strategies": [
+        "launch_w32_o12",
+        "launch_w32_o8",
+        "launch_w32_o16",
+        "launch_w32_o24",
+        "unroll_pragma8",
+        "unroll_pragma16",
+        "restrict_qualifiers"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts OR all strategies exhausted without acceptance",
+      "revisit_condition": "If a different kernel is accepted and changes memory pressure significantly"
+    },
+    {
+      "target": "gemv_hfq6g256",
+      "reason_selected": "18% of decode cycles (Amdahl #2). No arch variant exists — any positive change is a win.",
+      "estimated_runtime_share": 0.18,
+      "expected_speedup_potential": 1.050,
+      "candidate_strategies": [
+        "launch_w32_o12",
+        "launch_w32_o8",
+        "launch_w32_o16",
+        "launch_w32_o24",
+        "unroll_pragma8",
+        "restrict_qualifiers"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts OR all strategies exhausted",
+      "revisit_condition": "After gemv_hfq4g256 tuning — may share optimal launch bounds"
+    },
+    {
+      "target": "gemv_hfq4g256_residual",
+      "reason_selected": "12% of decode cycles (Amdahl #3). gfx1100 variant exists but gfx12 occupancy is different. Phase 10 showed s_prefetch is harmful; launch-bounds sweep is unexplored.",
+      "estimated_runtime_share": 0.12,
+      "expected_speedup_potential": 1.035,
+      "candidate_strategies": [
+        "launch_w32_o12",
+        "launch_w32_o8",
+        "launch_w32_o16",
+        "launch_w32_o24",
+        "unroll_pragma8",
+        "restrict_qualifiers"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts",
+      "revisit_condition": "After gemv_hfq4g256 win confirms occupancy hypothesis"
+    },
+    {
+      "target": "gemv_hfq6g256_residual",
+      "reason_selected": "10% of decode cycles (Amdahl #4). No arch variant.",
+      "estimated_runtime_share": 0.10,
+      "expected_speedup_potential": 1.029,
+      "candidate_strategies": [
+        "launch_w32_o12",
+        "launch_w32_o8",
+        "launch_w32_o16",
+        "unroll_pragma8",
+        "restrict_qualifiers"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts",
+      "revisit_condition": "If gemv_hfq6g256 is accepted (likely share tuning)"
+    },
+    {
+      "target": "fused_qkv_hfq4g256",
+      "reason_selected": "8% of decode cycles (Amdahl #5). Fused 3-projection kernel — any ILP improvement helps.",
+      "estimated_runtime_share": 0.08,
+      "expected_speedup_potential": 1.023,
+      "candidate_strategies": [
+        "launch_w32_o12",
+        "launch_w32_o8",
+        "launch_w32_o16",
+        "unroll_pragma8",
+        "restrict_qualifiers"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts",
+      "revisit_condition": "If QKV structure changes in new model versions"
+    },
+    {
+      "target": "attention_flash_asym3_tile",
+      "reason_selected": "12% decode + 8% prefill. Has arithmetic component (softmax, score computation) — RDNA4 wave32 and occupancy tuning may help beyond pure BW kernels.",
+      "estimated_runtime_share": 0.12,
+      "expected_speedup_potential": 1.035,
+      "candidate_strategies": [
+        "launch_w32_o8",
+        "launch_w32_o12",
+        "launch_w32_o16",
+        "launch_w64_o4",
+        "unroll_pragma4",
+        "restrict_qualifiers"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts",
+      "revisit_condition": "After profiling confirms it is the arithmetic bottleneck at long context"
+    },
+    {
+      "target": "fused_gate_up_hfq4g256",
+      "reason_selected": "6% decode cycles (Amdahl #7). Fused SwiGLU gate+up path.",
+      "estimated_runtime_share": 0.06,
+      "expected_speedup_potential": 1.017,
+      "candidate_strategies": [
+        "launch_w32_o12",
+        "launch_w32_o8",
+        "launch_w32_o16",
+        "unroll_pragma8",
+        "restrict_qualifiers"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts",
+      "revisit_condition": "If SwiGLU structure changes"
+    },
+    {
+      "target": "fused_rmsnorm_mq_rotate",
+      "reason_selected": "4% decode (28 invocations per token — high frequency). Fused normalization+rotation path.",
+      "estimated_runtime_share": 0.04,
+      "expected_speedup_potential": 1.012,
+      "candidate_strategies": [
+        "launch_w32_o16",
+        "launch_w32_o24",
+        "unroll_pragma4",
+        "restrict_qualifiers",
+        "launch_w32_o8"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts",
+      "revisit_condition": "Never (low impact)"
+    },
+    {
+      "target": "rmsnorm",
+      "reason_selected": "3% decode, 3% prefill. Invoked per-layer — cumulative impact.",
+      "estimated_runtime_share": 0.03,
+      "expected_speedup_potential": 1.009,
+      "candidate_strategies": [
+        "launch_w32_o16",
+        "launch_w32_o24",
+        "unroll_pragma4",
+        "restrict_qualifiers",
+        "launch_w32_o8"
+      ],
+      "max_attempts": 5,
+      "move_on_condition": "5 failed attempts",
+      "revisit_condition": "Never (low impact)"
+    }
+  ]
+}

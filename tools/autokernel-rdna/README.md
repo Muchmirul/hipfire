@@ -10,16 +10,19 @@ Adapts the [AutoKernel](https://github.com/RightNow-AI/autokernel) loop — *pro
 # From the repo root:
 
 # 1. Capture baseline (requires gfx1201 GPU + hipfire bench binary)
-./tools/autokernel-rdna/run.sh baseline --arch gfx1201 --model qwen3.5:9b
+./tools/autokernel-rdna/run.sh baseline --arch gfx1201 --model qwen3.5:27b
 
 # 2. Profile and rank bottleneck kernels
-./tools/autokernel-rdna/run.sh profile --arch gfx1201 --model qwen3.5:9b
+./tools/autokernel-rdna/run.sh profile --arch gfx1201 --model qwen3.5:27b
 
 # 3. Optimize a specific kernel (interactive — you edit the .hip file)
 ./tools/autokernel-rdna/run.sh experiment --kernel gemv_hfq4g256 --arch gfx1201
 
 # 4. Full Amdahl-driven orchestration loop
-./tools/autokernel-rdna/run.sh orchestrate --arch gfx1201 --model qwen3.5:9b
+./tools/autokernel-rdna/run.sh orchestrate --arch gfx1201 --model qwen3.5:27b
+
+# 5. Autonomous Phase 13 optimization loop (unattended)
+ARCH=gfx1201 MODEL=qwen3.5:27b MAX_ITERS=100 ./tools/autokernel-rdna/autokernel_loop.sh
 ```
 
 ## Commands
@@ -122,6 +125,70 @@ Prefer `.gfx12.hip` unless the optimization is not safe on `gfx1200`. The compil
 - **Fuse** — Fuse dequant + matvec where profitable (already done in `gemv_hfq*` variants).
 - **No extra launches** — Avoid splitting into extra kernel invocations in the decode hot path.
 
+## Phase 13: Autonomous Optimization Loop
+
+`autokernel_loop.sh` is the Phase 13 main deliverable — a fully unattended autonomous loop that:
+
+1. Reads `workspace/orchestration_state.json` to know the current target kernel and which strategies have already been tried
+2. Picks the next untried strategy from the optimization plan for that target
+3. Backs up the kernel source file and applies the strategy mutation via `sed`
+4. Rebuilds the bench binary (`cargo build --release`)
+5. Runs the correctness gate (`scripts/test-kernels.sh`)
+6. Benchmarks across `BENCH_TRIALS` fresh-process runs
+7. ACCEPTs if: median speedup ≥ `ACCEPT_MIN_SPEEDUP` AND correctness passes
+8. REJECTs (reverts) otherwise
+9. Appends a row to `results.tsv` with all 39 fields including Phase 13 loop columns
+10. Saves candidate diff + build log to `workspace/candidates/iter-NNN/`
+11. Saves accepted diffs to `workspace/accepted/`, rejected to `workspace/rejected/`
+12. Updates `orchestration_state.json` for resume across crashes
+
+### How to run
+
+```bash
+# Short run (100 iterations — explore 1–2 kernels)
+ARCH=gfx1201 MODEL=qwen3.5:27b MAX_ITERS=100 ./tools/autokernel-rdna/autokernel_loop.sh
+
+# Overnight run (300 iterations, lower acceptance threshold, auto-commit)
+ARCH=gfx1201 MODEL=qwen3.5:27b MAX_ITERS=300 ACCEPT_MIN_SPEEDUP=1.005 AUTOCOMMIT=1 \
+  ./tools/autokernel-rdna/autokernel_loop.sh
+
+# Smoke test with 9B model (faster builds, but less representative)
+ARCH=gfx1201 MODEL=qwen3.5:9b MAX_ITERS=10 BENCH_TRIALS=2 \
+  ./tools/autokernel-rdna/autokernel_loop.sh
+```
+
+### How to stop safely
+
+```bash
+# Touch the stop flag — loop will finish the current iteration cleanly and write the final report
+touch .autokernel_stop
+
+# Or press Ctrl-C — the SIGINT handler writes the final report before exiting
+```
+
+### Where results are saved
+
+| Path | Contents |
+|------|----------|
+| `tools/autokernel-rdna/results.tsv` | All iterations appended (39 cols) |
+| `tools/autokernel-rdna/workspace/orchestration_state.json` | Current loop state (resume on restart) |
+| `tools/autokernel-rdna/workspace/candidates/iter-NNN/` | diff + build log for each iteration |
+| `tools/autokernel-rdna/workspace/accepted/` | Diffs of all accepted candidates |
+| `tools/autokernel-rdna/workspace/rejected/` | Diffs of all rejected candidates |
+| `tools/autokernel-rdna/reports/phase13_autokernel_loop_<ts>.{md,json}` | Final summary report |
+
+### Known limitations
+
+- **Qwen3.5-27B requires ~24 GB VRAM** — `hipMalloc` OOM at >16K ctx on 24 GB cards. Use default `--ctx 2048`.
+- **Each build takes 5–10 min** (full `cargo build --release`). 100 iterations ≈ 8–17 hours wall-clock.
+- **Strategy library is conservative**: launch bounds, `#pragma unroll`, `__restrict__` qualifiers. Complex mutations (LDS tiling, vector-width changes) require manual kernel editing — use `run.sh experiment` for those.
+- **Baseline is cached**: delete `tools/autokernel-rdna/baselines/` to force a fresh baseline measurement before the loop.
+- **State persists**: `orchestration_state.json` survives crashes. To reset and restart from scratch: `rm tools/autokernel-rdna/workspace/orchestration_state.json`.
+- **DFlash disabled by default**: the bench uses `--ar-baseline`. DFlash benches need `hipfire config set dflash_mode auto`.
+- **AUTOCOMMIT=1**: auto-commits accepted candidates to the current branch. Review commits before pushing.
+
+---
+
 ## Results Format
 
 `results.tsv` columns (tab-separated):
@@ -160,3 +227,15 @@ Prefer `.gfx12.hip` unless the optimization is not safe on `gfx1200`. The compil
 | `decision` | KEEP / REVERT |
 | `revert_reason` | Reason for revert (if applicable) |
 | `notes` | Freeform notes |
+
+**Phase 13 loop columns** (present only in rows written by `autokernel_loop.sh`):
+
+| Column | Description |
+|--------|-------------|
+| `loop_iteration` | Iteration number within the loop run |
+| `loop_target` | Kernel name being optimized this iteration |
+| `loop_strategy` | Strategy name applied (e.g. `launch_w32_o12`) |
+| `loop_files_changed` | Semicolon-separated list of modified `.hip` files |
+| `benchmark_status` | `ok` / `timeout` / `crash` / `build_fail` / `correctness_fail` |
+| `current_best_tok_s` | Best tok/s seen so far in this loop run |
+| `speedup_vs_current_best` | `candidate_decode_tok_s / current_best_tok_s` |

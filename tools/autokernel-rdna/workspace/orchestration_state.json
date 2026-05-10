@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "current_target": "gemv_hfq4g256",
+  "target_queue": [
+    "gemv_hfq4g256",
+    "gemv_hfq6g256",
+    "gemv_hfq4g256_residual",
+    "gemv_hfq6g256_residual",
+    "fused_qkv_hfq4g256",
+    "attention_flash_asym3_tile",
+    "fused_gate_up_hfq4g256",
+    "fused_rmsnorm_mq_rotate",
+    "rmsnorm"
+  ],
+  "accepted_candidates": [],
+  "rejected_candidates": [],
+  "best_tok_s": 0.0,
+  "baseline_tok_s": 0.0,
+  "best_speedup": 1.0,
+  "attempts_per_target": {},
+  "strategies_tried": {},
+  "crash_count": 0,
+  "timeout_count": 0,
+  "plateau_count": 0,
+  "last_decision": "INIT",
+  "next_action": "CONTINUE",
+  "total_iterations": 0
+}

@@ -5,10 +5,10 @@
 # hipfire's Rust + HIP architecture targeting AMD Radeon RX 9070 XT / gfx1201.
 #
 # Usage:
-#   ./tools/autokernel-rdna/run.sh baseline   --arch gfx1201 --model qwen3.5:9b
-#   ./tools/autokernel-rdna/run.sh profile    --arch gfx1201 --model qwen3.5:9b
+#   ./tools/autokernel-rdna/run.sh baseline   --arch gfx1201 --model qwen3.5:27b
+#   ./tools/autokernel-rdna/run.sh profile    --arch gfx1201 --model qwen3.5:27b
 #   ./tools/autokernel-rdna/run.sh experiment --kernel <name> --arch gfx1201
-#   ./tools/autokernel-rdna/run.sh orchestrate --arch gfx1201 --model qwen3.5:9b
+#   ./tools/autokernel-rdna/run.sh orchestrate --arch gfx1201 --model qwen3.5:27b
 #
 # Hard rules (per docs/methodology/perf-benchmarking.md + AGENTS.md):
 #   - Never claim speedup from a single noisy run.
@@ -46,7 +46,7 @@ KERNEL_CACHE="${HIPFIRE_KERNEL_CACHE:-$HOME/.hipfire/bin/kernels}"
 
 # ── Defaults ─────────────────────────────────────────────────────────────
 OPT_ARCH="gfx1201"
-OPT_MODEL="qwen3.5:9b"
+OPT_MODEL="qwen3.5:27b"
 OPT_KERNEL=""
 OPT_ALLOW_OTHER_ARCH=0
 OPT_TRIALS=3
@@ -931,7 +931,7 @@ Commands:
 
 Global options:
   --arch <gfx>          Target arch (default: gfx1201)
-  --model <name>        hipfire model tag (default: qwen3.5:9b)
+  --model <name>        hipfire model tag (default: qwen3.5:27b)
   --allow-other-arch    Allow running on non-target arch (testing only)
   --trials <n>          Number of fresh-process benchmark trials (default: 3)
   --speedup-threshold   Minimum speedup to accept (default: 1.08)
@@ -943,8 +943,8 @@ experiment options:
   --kernel <name>       Kernel base name (e.g. gemv_hfq4g256)
 
 Examples:
-  ./tools/autokernel-rdna/run.sh baseline --arch gfx1201 --model qwen3.5:9b
-  ./tools/autokernel-rdna/run.sh profile  --arch gfx1201 --model qwen3.5:9b
+  ./tools/autokernel-rdna/run.sh baseline --arch gfx1201 --model qwen3.5:27b
+  ./tools/autokernel-rdna/run.sh profile  --arch gfx1201 --model qwen3.5:27b
   ./tools/autokernel-rdna/run.sh experiment --kernel gemv_hfq4g256 --arch gfx1201
   ./tools/autokernel-rdna/run.sh orchestrate --arch gfx1201 --model qwen3.5:9b
 EOF

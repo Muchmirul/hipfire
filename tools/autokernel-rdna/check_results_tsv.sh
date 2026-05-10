@@ -66,12 +66,32 @@ REQUIRED_COLS=(
     notes
 )
 
+# Phase 13 columns — optional (present only when rows come from autokernel_loop.sh).
+OPTIONAL_PHASE13_COLS=(
+    loop_iteration
+    loop_target
+    loop_strategy
+    loop_files_changed
+    benchmark_status
+    current_best_tok_s
+    speedup_vs_current_best
+)
+
 HEADER="$(head -1 "$TSV")"
 for col in "${REQUIRED_COLS[@]}"; do
     if echo "$HEADER" | grep -qw "$col"; then
         ok "column present: $col"
     else
         fail "required column MISSING: $col"
+    fi
+done
+
+# Phase 13 optional columns — warn if missing (not error), info if present.
+for col in "${OPTIONAL_PHASE13_COLS[@]}"; do
+    if echo "$HEADER" | grep -qw "$col"; then
+        ok "phase13 column present: $col"
+    else
+        warn "phase13 column absent (ok for pre-Phase-13 rows): $col"
     fi
 done
 
