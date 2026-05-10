@@ -1,0 +1,57 @@
+{
+  "phase": 16,
+  "timestamp": "20260510-162306",
+  "decision": "PASS_INFRA_ONLY",
+  "environment": {
+    "date": "2026-05-10T16:23:06Z",
+    "hostname": "dev-MS-7C56",
+    "git_sha": "93dfd15d339cb593a56a5f3204e5d9dd8cbe646a",
+    "git_dirty_files": 33,
+    "gpu": "\t\t0x7550",
+    "arch_detected": "unknown",
+    "arch_requested": "gfx1201",
+    "rocm": "7.2.1",
+    "kernel": "6.17.0-23-generic",
+    "model": "qwen3.5:27b",
+    "trials": 1
+  },
+  "infra_status": "PASS",
+  "pipeline_missing": [],
+  "infra_errors": [],
+  "build_status": "PASS",
+  "build_log": "/home/dev/hipfire-pr1-review/tools/autokernel-rdna/reports/phase16_build_20260510-162306.log",
+  "correctness": {
+    "overall": "PASS",
+    "speed_gate": "PASS",
+    "coherence_gate": "SKIPPED"
+  },
+  "tsv_check_status": "WARN",
+  "candidates": {
+    "generated": 7,
+    "harness_pass": 0,
+    "promoted_total": 3,
+    "accepted": 0,
+    "rejected": 3,
+    "latest_accepted": ""
+  },
+  "bench_27b": {
+    "status": "SKIPPED",
+    "model_path": "",
+    "prompt_md5": "",
+    "trials": 1,
+    "all_tok_s": [],
+    "median_tok_s": 0.0,
+    "min_tok_s": 0.0,
+    "max_tok_s": 0.0
+  },
+  "baseline": {
+    "status": "NEEDS_BASELINE",
+    "source": "",
+    "baseline_tok_s": 0.0,
+    "final_tok_s": 0.0,
+    "delta_tok_s": 0.0,
+    "speedup": 0.0,
+    "speedup_pct": 0.0,
+    "speedup_status": "UNKNOWN"
+  }
+}

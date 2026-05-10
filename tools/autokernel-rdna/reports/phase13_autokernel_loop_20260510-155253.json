@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-05-10T15:52:54Z",
+  "model": "qwen3.5:27b",
+  "arch": "gfx1201",
+  "max_iters": 2,
+  "accept_min_speedup": 1.005,
+  "total_iterations": 2,
+  "baseline_tok_s": 93.1,
+  "best_tok_s": 0,
+  "best_speedup": 0.0,
+  "accepted_candidates": [],
+  "rejected_count": 0,
+  "crash_count": 0,
+  "timeout_count": 0,
+  "plateau_count": 1,
+  "next_recommended_target": "gemv_hfq6g256",
+  "rerun_command": "ARCH=gfx1201 MODEL=qwen3.5:27b MAX_ITERS=2 ACCEPT_MIN_SPEEDUP=1.005 ./tools/autokernel-rdna/autokernel_loop.sh"
+}

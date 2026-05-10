@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-05-10T16:11:52Z",
+  "arch": "gfx1201",
+  "model": "qwen3.5:27b",
+  "target_name": "gemv_hfq4g256",
+  "candidate_hip": "/home/dev/hipfire-pr1-review/tools/autokernel-rdna/kernel_lab/generated/gemv_hfq4g256/candidate_1.hip",
+  "promoted_dest": "/home/dev/hipfire-pr1-review/kernels/src/gemv_hfq4g256.gfx1201.hip",
+  "dispatch_files_changed": "none (arch-specific variant file replaces/creates .gfx1201.hip)",
+  "backup_dir": "/home/dev/hipfire-pr1-review/tools/autokernel-rdna/workspace/promotion_backups/20260510-161152",
+  "harness_correctness": "PASS",
+  "harness_speedup": "1.2997",
+  "build_status": "PASS",
+  "correctness_status": "PASS",
+  "baseline_tok_s": "93.1",
+  "candidate_tok_s": "35.1",
+  "hipfire_speedup": "0.3770",
+  "decision": "FAIL_REVERTED",
+  "reject_reason": "hipfire speedup 0.3770\u00d7 < threshold 1.005\u00d7",
+  "rollback_status": "OK",
+  "rollback_cmd": "cp /home/dev/hipfire-pr1-review/tools/autokernel-rdna/workspace/promotion_backups/20260510-161152/gemv_hfq4g256.gfx1201.hip /home/dev/hipfire-pr1-review/kernels/src/gemv_hfq4g256.gfx1201.hip"
+}
