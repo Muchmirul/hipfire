@@ -75,7 +75,7 @@ cat > "$DRIVER_SRC" <<'CPPEOF'
     } \
 } while(0)
 
-extern "C" void gemv_hfq6g256(const char* A, const float* x, float* y, int M, int K);
+extern "C" __global__ void gemv_hfq6g256(const char* A, const float* x, float* y, int M, int K);
 
 // CPU reference for HFQ6-G256.
 // HFQ6 bit packing: 256 weights * 6 bits = 1536 bits = 192 bytes payload + 8 bytes header.

@@ -115,6 +115,31 @@ for col in "${OPTIONAL_PHASE14_COLS[@]}"; do
     fi
 done
 
+# Phase 15 columns — optional (present only when promote_kernel.sh rows exist).
+OPTIONAL_PHASE15_COLS=(
+    phase
+    promotion_candidate_dir
+    promoted_kernel_file
+    dispatch_files_changed
+    p15_harness_correctness_status
+    p15_harness_speedup
+    hipfire_build_status
+    hipfire_correctness_status
+    hipfire_baseline_tok_s
+    hipfire_candidate_tok_s
+    hipfire_speedup
+    promotion_decision
+    rollback_status
+    reject_reason
+)
+for col in "${OPTIONAL_PHASE15_COLS[@]}"; do
+    if echo "$HEADER" | grep -qw "$col"; then
+        ok "phase15 column present: $col"
+    else
+        warn "phase15 column absent (ok for pre-Phase-15 rows): $col"
+    fi
+done
+
 # Build column index map
 declare -A COL_IDX
 IFS=$'\t' read -ra COLS <<< "$HEADER"

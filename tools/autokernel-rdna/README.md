@@ -170,7 +170,7 @@ touch .autokernel_stop
 
 | Path | Contents |
 |------|----------|
-| `tools/autokernel-rdna/results.tsv` | All iterations appended (48 cols: 32 core + 7 Phase 13 + 9 Phase 14) |
+| `tools/autokernel-rdna/results.tsv` | All iterations appended (62 cols: 32 core + 7 Phase 13 + 9 Phase 14 + 14 Phase 15) |
 | `tools/autokernel-rdna/workspace/orchestration_state.json` | Current loop state (resume on restart) |
 | `tools/autokernel-rdna/workspace/candidates/iter-NNN/` | diff + build log for each iteration |
 | `tools/autokernel-rdna/workspace/accepted/` | Diffs of all accepted candidates |
@@ -327,3 +327,115 @@ ERROR: <msg>               # only on FAIL
 - **gemv_hfq6g256 harness CPU reference assumes 4-weights-per-3-bytes packing.** Verify against `kernels/src/gemv_hfq6g256.hip` before trusting PASS results.
 - **Build time:** promotion triggers `cargo build --release` (5–10 min). Budget accordingly.
 - **No MoE support:** MQ3 + MoE/A3B is refused at load time (inherited from AGENTS.md). Authoring targets are dense-model GEMV only.
+
+---
+
+## Phase 15 — Kernel Promotion Pipeline
+
+Phase 15 provides a safe, reproducible pipeline for promoting a `kernel_lab` winner
+into hipfire: backup → install → build → correctness → Qwen3.5-27B benchmark → accept/revert.
+
+### How to promote a candidate
+
+```bash
+ARCH=gfx1201 \
+MODEL=qwen3.5:27b \
+CANDIDATE=tools/autokernel-rdna/kernel_lab/generated/<target>/candidate_N.hip \
+./tools/autokernel-rdna/promote_kernel.sh
+```
+
+The candidate must have passed the harness (correctness + speedup above threshold).
+If `harness_result.json` is absent next to the candidate, the harness is re-run automatically.
+
+**Optional env vars:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `ACCEPT_MIN_SPEEDUP` | `1.005` | Minimum hipfire tok/s ratio to accept |
+| `ALLOW_OTHER_ARCH` | `0` | Set `1` to skip arch check |
+| `AUTOCOMMIT` | `0` | Set `1` to `git commit` on accept |
+| `SKIP_COHERENCE` | `0` | Set `1` to skip coherence-gate-dflash.sh |
+| `SKIP_SPEED_GATE` | `0` | Set `1` to skip speed-gate.sh --fast |
+
+### What the script does
+
+1. Reads `target_spec.json` next to the candidate (or in parent dir).
+2. Refuses to promote if harness correctness failed or speedup below threshold.
+3. Determines promotion destination from `gfx1201_variant` in spec (`kernels/src/<kernel>.gfx1201.hip`).
+4. Creates a timestamped backup in `tools/autokernel-rdna/workspace/promotion_backups/<timestamp>/`.
+5. Copies candidate to `kernels/src/<kernel>.gfx1201.hip`.
+6. Runs `cargo build --release` — reverts on failure.
+7. Runs `test-kernels.sh`, `coherence-gate-dflash.sh`, `speed-gate.sh --fast`.
+8. Benchmarks Qwen3.5-27B tok/s (baseline vs candidate).
+9. Accepts if speedup ≥ threshold; otherwise restores backup.
+
+### Where backups are stored
+
+```
+tools/autokernel-rdna/workspace/promotion_backups/<timestamp>/
+  ├── <kernel>.gfx1201.hip.bak   # original kernel (if it existed)
+  ├── candidate_N.hip             # candidate that was attempted
+  ├── target_spec.json.bak
+  ├── git_diff_before.patch       # state before promotion
+  ├── build.log                   # cargo build output
+  ├── promoted_dest.txt           # path that was written
+  └── dest_existed_before.txt     # 0 or 1
+```
+
+### How to rollback
+
+```bash
+# From backup dir (printed at end of promote_kernel.sh):
+cp tools/autokernel-rdna/workspace/promotion_backups/<timestamp>/<kernel>.gfx1201.hip.bak \
+   kernels/src/<kernel>.gfx1201.hip
+
+# Or if the file didn't exist before promotion:
+rm -f kernels/src/<kernel>.gfx1201.hip
+```
+
+The promotion report (`reports/phase15_promotion_<timestamp>.md`) contains the exact rollback command.
+
+### Accepted and rejected promotions
+
+- Accepted candidates are archived to `tools/autokernel-rdna/workspace/accepted_promotions/`
+- Rejected candidates are archived to `tools/autokernel-rdna/workspace/rejected_promotions/`
+- Every attempt is appended to `results.tsv` (columns 49–62, Phase 15 fields)
+
+### How to validate on Qwen3.5-27B after manual promotion
+
+```bash
+# Re-run the bench manually (after cargo build --release):
+./target/release/examples/bench_qwen35_mq4 \
+  ~/.hipfire/models/qwen3.5-27b.mq4 \
+  --gen 80 --warmup 5 \
+  < benchmarks/prompts/lru_cache_pep8_strict.txt
+```
+
+Compare `gen_tok_s` to the baseline in `tools/autokernel-rdna/baselines/`.
+
+### Phase 15 TSV columns (cols 49–62)
+
+| Column | Description |
+|---|---|
+| `phase` | `phase15` |
+| `promotion_candidate_dir` | Directory containing the promoted candidate |
+| `promoted_kernel_file` | Destination path in `kernels/src/` |
+| `dispatch_files_changed` | Rust dispatch files modified (or `none`) |
+| `p15_harness_correctness_status` | `PASS` / `FAIL` from harness |
+| `p15_harness_speedup` | Harness speedup vs reference |
+| `hipfire_build_status` | `PASS` / `FAIL` |
+| `hipfire_correctness_status` | `PASS` / `FAIL` from coherence gate |
+| `hipfire_baseline_tok_s` | Pre-promotion baseline tok/s |
+| `hipfire_candidate_tok_s` | Post-promotion candidate tok/s |
+| `hipfire_speedup` | `hipfire_candidate_tok_s / hipfire_baseline_tok_s` |
+| `promotion_decision` | `PASS_PROMOTED` / `FAIL_REVERTED` / `NEEDS_MANUAL_REVIEW` |
+| `rollback_status` | `OK` / `NO_BACKUP` / `FAIL_NO_FILES` |
+| `reject_reason` | Human-readable reject reason if `FAIL_REVERTED` |
+
+### Hard rules
+
+- Promote only one candidate at a time.
+- Never delete fallback kernels.
+- Never overwrite fallback without backup.
+- Correctness is a hard gate — fast-but-wrong = FAIL_REVERTED.
+- Do not alter the benchmark evaluator to make candidates pass.

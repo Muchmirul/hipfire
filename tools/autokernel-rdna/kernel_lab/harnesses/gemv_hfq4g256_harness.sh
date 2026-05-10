@@ -85,7 +85,7 @@ cat > "$DRIVER_SRC" <<'CPPEOF'
 } while(0)
 
 // Declaration — provided by the kernel being tested.
-extern "C" void gemv_hfq4g256(const char* A, const float* x, float* y, int M, int K);
+extern "C" __global__ void gemv_hfq4g256(const char* A, const float* x, float* y, int M, int K);
 
 // Reference implementation (CPU, exact arithmetic reference).
 static void cpu_gemv_hfq4g256_ref(const char* A, const float* x, float* y_ref, int M, int K) {

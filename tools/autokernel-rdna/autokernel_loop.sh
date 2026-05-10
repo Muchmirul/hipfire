@@ -154,7 +154,7 @@ resolve_model_path() {
         "$MODELS_DIR/qwen3.5-9b.mq4"
         "$MODELS_DIR/qwen35-9b.mq4"
     )
-    for f in "$MODELS_DIR"/*.mq4 2>/dev/null; do
+    for f in "$MODELS_DIR"/*.mq4; do
         [ -f "$f" ] && candidates+=("$f")
     done
     for c in "${candidates[@]}"; do

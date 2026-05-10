@@ -65,7 +65,7 @@ cat > "$DRIVER_SRC" <<'CPPEOF'
     } \
 } while(0)
 
-extern "C" void gemv_hfq4g256_residual(
+extern "C" __global__ void gemv_hfq4g256_residual(
     const char* A, const float* x, const float* residual, float* y, int M, int K);
 
 static void cpu_ref(const char* A, const float* x, const float* residual,

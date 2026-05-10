@@ -47,9 +47,9 @@ else
     C_GREEN=''; C_YELLOW=''; C_RED=''; C_CYAN=''; C_BOLD=''; C_RESET=''
 fi
 
-log_info()  { echo -e "${C_CYAN}[author_kernel]${C_RESET} $*"; }
-log_ok()    { echo -e "${C_GREEN}[author_kernel]${C_RESET} $*"; }
-log_warn()  { echo -e "${C_YELLOW}[author_kernel]${C_RESET} $*"; }
+log_info()  { echo -e "${C_CYAN}[author_kernel]${C_RESET} $*" >&2; }
+log_ok()    { echo -e "${C_GREEN}[author_kernel]${C_RESET} $*" >&2; }
+log_warn()  { echo -e "${C_YELLOW}[author_kernel]${C_RESET} $*" >&2; }
 log_error() { echo -e "${C_RED}[author_kernel]${C_RESET} $*" >&2; }
 
 # ── Available authoring strategies ─────────────────────────────────────────
