@@ -98,6 +98,52 @@ fn gemv_prefetch_enabled(arch: &str) -> bool {
     override_.unwrap_or(arch == "gfx906")
 }
 
+fn parse_bool_env(raw: &str) -> Option<bool> {
+    match raw {
+        "1" | "true" | "TRUE" | "on" | "ON" => Some(true),
+        "0" | "false" | "FALSE" | "off" | "OFF" => Some(false),
+        _ => None,
+    }
+}
+
+fn autokernel_decode_enabled() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_DECODE")
+            .ok()
+            .as_deref()
+            .and_then(parse_bool_env)
+            .unwrap_or(false)
+    })
+}
+
+fn log_decode_backend_once() {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    if LOGGED.set(()).is_ok() {
+        if autokernel_decode_enabled() {
+            eprintln!("[hipfire] decode backend: autokernel (asym3 KV fast path)");
+        } else {
+            eprintln!("[hipfire] decode backend: native (set HIPFIRE_AUTOKERNEL_DECODE=1 for autokernel asym3 path)");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bool_env;
+
+    #[test]
+    fn parse_bool_env_accepts_expected_values() {
+        assert_eq!(parse_bool_env("1"), Some(true));
+        assert_eq!(parse_bool_env("true"), Some(true));
+        assert_eq!(parse_bool_env("on"), Some(true));
+        assert_eq!(parse_bool_env("0"), Some(false));
+        assert_eq!(parse_bool_env("false"), Some(false));
+        assert_eq!(parse_bool_env("off"), Some(false));
+        assert_eq!(parse_bool_env("maybe"), None);
+    }
+}
+
 /// Per-arch default R for the multi-row HFQ4 GEMV kernel family.
 ///
 /// - RDNA3 (gfx1100/1101/1102): R=1. Measured negative on 7900 XTX —
@@ -11957,6 +12003,50 @@ impl Gpu {
         n_kv_heads: usize, head_dim: usize,
     ) -> HipResult<()> {
         self.bind_thread()?;
+        log_decode_backend_once();
+        if autokernel_decode_enabled() {
+            self.ensure_givens4_kernel(
+                "kv_cache_write_asym_k_givens3",
+                kernels::KV_CACHE_WRITE_ASYM_K_GIVENS3_SRC,
+                "kv_cache_write_asym_k_givens3",
+            )?;
+            {
+                let kdp = k_dst.buf.as_ptr();
+                let ksp = k_src.buf.as_ptr();
+                let pp = pos_buf.as_ptr();
+                let ctp = cos_theta.buf.as_ptr();
+                let stp = sin_theta.buf.as_ptr();
+                let nkv = n_kv_heads as i32;
+                let hd = head_dim as i32;
+                let mut params: Vec<*mut c_void> = vec![
+                    &kdp as *const _ as *mut c_void,
+                    &ksp as *const _ as *mut c_void,
+                    &pp as *const _ as *mut c_void,
+                    &ctp as *const _ as *mut c_void,
+                    &stp as *const _ as *mut c_void,
+                    &nkv as *const _ as *mut c_void,
+                    &hd as *const _ as *mut c_void,
+                ];
+                // +32 float lanes for reduction scratch (one wave) to match the
+                // native asym3 K-writer LDS layout.
+                let shared_mem = ((head_dim + 32) * 4) as u32;
+                self.launch_maybe_blob(
+                    "kv_cache_write_asym_k_givens3",
+                    [n_kv_heads as u32, 1, 1],
+                    [32, 1, 1],
+                    shared_mem,
+                    &mut params,
+                    || {
+                        let mut b = hip_bridge::KernargBlob::new();
+                        b.push_ptr(kdp); b.push_ptr(ksp); b.push_ptr(pp);
+                        b.push_ptr(ctp); b.push_ptr(stp);
+                        b.push_i32(nkv); b.push_i32(hd);
+                        b
+                    },
+                )?;
+            }
+            return self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
+        }
         self.ensure_givens4_kernel(
             "kv_cache_write_asym_k_givens3",
             kernels::KV_CACHE_WRITE_ASYM_K_GIVENS3_SRC,
@@ -12391,10 +12481,108 @@ impl Gpu {
         partials: &GpuTensor,
     ) -> HipResult<()> {
         self.bind_thread()?;
+        log_decode_backend_once();
         const TILE_SIZE: usize = 128;
         let max_tiles = (max_seq + TILE_SIZE - 1) / TILE_SIZE;
         let actual_tiles = (seq_len_hint + TILE_SIZE - 1) / TILE_SIZE;
         let launch_tiles = if self.capture_mode { max_tiles } else { actual_tiles };
+
+        if autokernel_decode_enabled() {
+            self.ensure_givens4_kernel(
+                "attention_flash_asym3_tile",
+                kernels::ATTENTION_FLASH_ASYM3_TILE_SRC,
+                "attention_flash_asym3_tile",
+            )?;
+            {
+                let q_ptr = q.buf.as_ptr();
+                let k_ptr = k_cache.buf.as_ptr();
+                let v_ptr = v_cache.buf.as_ptr();
+                let p_ptr = partials.buf.as_ptr();
+                let pos_ptr = pos_buf.as_ptr();
+                let ct_ptr = cos_theta.buf.as_ptr();
+                let st_ptr = sin_theta.buf.as_ptr();
+                let nh = n_heads as i32;
+                let nkv = n_kv_heads as i32;
+                let hd = head_dim as i32;
+                let ms = max_seq as i32;
+                let sc = 1.0f32 / (head_dim as f32).sqrt();
+                let ts = TILE_SIZE as i32;
+                let mt = max_tiles as i32;
+                let mut params: Vec<*mut c_void> = vec![
+                    &q_ptr as *const _ as *mut c_void,
+                    &k_ptr as *const _ as *mut c_void,
+                    &v_ptr as *const _ as *mut c_void,
+                    &p_ptr as *const _ as *mut c_void,
+                    &pos_ptr as *const _ as *mut c_void,
+                    &ct_ptr as *const _ as *mut c_void,
+                    &st_ptr as *const _ as *mut c_void,
+                    &nh as *const _ as *mut c_void,
+                    &nkv as *const _ as *mut c_void,
+                    &hd as *const _ as *mut c_void,
+                    &ms as *const _ as *mut c_void,
+                    &sc as *const _ as *mut c_void,
+                    &ts as *const _ as *mut c_void,
+                    &mt as *const _ as *mut c_void,
+                ];
+                self.launch_maybe_blob(
+                    "attention_flash_asym3_tile",
+                    [n_heads as u32, launch_tiles as u32, 1],
+                    [32, 1, 1],
+                    // scores[tile_size] as f32.
+                    (TILE_SIZE * 4) as u32,
+                    &mut params,
+                    || {
+                        let mut b = hip_bridge::KernargBlob::new();
+                        b.push_ptr(q_ptr); b.push_ptr(k_ptr); b.push_ptr(v_ptr);
+                        b.push_ptr(p_ptr); b.push_ptr(pos_ptr);
+                        b.push_ptr(ct_ptr); b.push_ptr(st_ptr);
+                        b.push_i32(nh); b.push_i32(nkv); b.push_i32(hd); b.push_i32(ms);
+                        b.push_f32(sc); b.push_i32(ts); b.push_i32(mt);
+                        b
+                    },
+                )?;
+            }
+
+            self.ensure_kernel(
+                "attention_flash_q8_0_reduce",
+                kernels::ATTENTION_FLASH_Q8_0_REDUCE_SRC,
+                "attention_flash_q8_0_reduce",
+            )?;
+            {
+                let p_ptr = partials.buf.as_ptr();
+                let o_ptr = out.buf.as_ptr();
+                let nh = n_heads as i32;
+                let hd = head_dim as i32;
+                let pos_ptr = pos_buf.as_ptr();
+                let ts = TILE_SIZE as i32;
+                let mt = max_tiles as i32;
+                let mut params: Vec<*mut c_void> = vec![
+                    &p_ptr as *const _ as *mut c_void,
+                    &o_ptr as *const _ as *mut c_void,
+                    &nh as *const _ as *mut c_void,
+                    &hd as *const _ as *mut c_void,
+                    &pos_ptr as *const _ as *mut c_void,
+                    &ts as *const _ as *mut c_void,
+                    &mt as *const _ as *mut c_void,
+                ];
+                self.launch_maybe_blob(
+                    "attention_flash_q8_0_reduce",
+                    [n_heads as u32, 1, 1],
+                    [32, 1, 1],
+                    0,
+                    &mut params,
+                    || {
+                        let mut b = hip_bridge::KernargBlob::new();
+                        b.push_ptr(p_ptr); b.push_ptr(o_ptr);
+                        b.push_i32(nh); b.push_i32(hd);
+                        b.push_ptr(pos_ptr);
+                        b.push_i32(ts); b.push_i32(mt);
+                        b
+                    },
+                )?;
+            }
+            return Ok(());
+        }
 
         self.ensure_givens4_kernel(
             "attention_flash_asym3_tile",
