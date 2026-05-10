@@ -406,22 +406,33 @@ print(s.get('current_best_tok_s', 0))
     AK_PROMOTED=1
 
     # Step 6: End-to-end hipfire benchmark
+    # Bug fix: bench writes ONLY to stderr; 2>/dev/null swallowed all output.
+    # Bug fix: hardcoded 27b path ignored MODEL var — now uses resolve_model_path.
     log_info "  Running end-to-end hipfire bench (3 trials)..."
     local bench_bin="$REPO_ROOT/target/release/examples/bench_qwen35_mq4"
-    local model_path
-    model_path=$(ls /media/dev/Tforce/dev/radeonmax/baselines/hipfire/.hipfire/models/qwen3.5-27b.mq4 2>/dev/null || \
-                 ls ~/.hipfire/models/qwen3.5-27b.mq4 2>/dev/null || echo "")
+    # Resolve model path respecting MODEL env var (default qwen3.5:27b)
+    local _model_size; _model_size=$(echo "${MODEL:-qwen3.5:27b}" | grep -oP '\d+b' | head -1)
+    local model_path=""
+    for _mp in \
+        "$MODELS_DIR/qwen3.5-${_model_size}.mq4" \
+        "$MODELS_DIR/qwen35-${_model_size}.mq4" \
+        "$HOME/.hipfire/models/qwen3.5-${_model_size}.mq4"
+    do
+        if [ -f "$_mp" ]; then model_path="$_mp"; break; fi
+    done
     local prompt_file="$REPO_ROOT/benchmarks/prompts/lru_cache_pep8_strict.txt"
 
     if [ ! -f "$bench_bin" ] || [ ! -f "$model_path" ] || [ ! -f "$prompt_file" ]; then
         log_warn "  E2E bench skipped (bench binary or model or prompt not found)"
+        log_warn "    bench_bin=$bench_bin  model_path=$model_path"
         AK_HIPFIRE_TOK_S="0"
     else
         local tok_s_sum=0
         local valid_runs=0
         for trial in 1 2 3; do
             local trial_out
-            trial_out=$(cat "$prompt_file" | "$bench_bin" "$model_path" --gen 80 --warmup 10 2>/dev/null | grep 'gen_tok_s=' | head -1)
+            # bench writes to stderr — capture with 2>&1, NOT 2>/dev/null
+            trial_out=$(cat "$prompt_file" | "$bench_bin" "$model_path" --gen 80 --warmup 10 2>&1 | grep 'gen_tok_s=' | head -1)
             local ts
             ts=$(echo "$trial_out" | grep -oP 'gen_tok_s=\K[0-9.]+')
             if [ -n "$ts" ]; then

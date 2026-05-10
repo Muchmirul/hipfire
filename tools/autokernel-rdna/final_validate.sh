@@ -405,23 +405,24 @@ PYEOF
 compare_to_baseline() {
     log "Step 8: Comparing to original baseline..."
 
-    # Look for a 27B-specific baseline
+    # Look for a 27B-specific baseline — iterate newest-first so we pick the
+    # most recent measurement, not whichever globbing happens to return first.
     local baseline_27b=""
-    for f in "$BASELINES_DIR"/*.json; do
-        [[ -f "$f" ]] || continue
+    while IFS= read -r _bf; do
+        [[ -f "$_bf" ]] || continue
         local bmodel
         bmodel=$(python3 -c "
 import json, sys
 try:
-    d = json.load(open('$f'))
+    d = json.load(open('$_bf'))
     print(d.get('model', ''))
 except: print('')
 " 2>/dev/null || echo "")
         if [[ "$bmodel" == *"27b"* ]]; then
-            baseline_27b="$f"
+            baseline_27b="$_bf"
             break
         fi
-    done
+    done < <(ls -t "$BASELINES_DIR"/*.json 2>/dev/null)
 
     if [[ -n "$baseline_27b" ]]; then
         BASELINE_TOK_S=$(python3 -c "

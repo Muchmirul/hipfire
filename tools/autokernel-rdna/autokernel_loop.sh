@@ -624,13 +624,23 @@ log_tsv_row() {
 # ─────────────────────────────────────────────────────────────────────────────
 ensure_baseline() {
     # Returns cached or freshly-measured baseline decode tok/s.
-    local latest_json
-    latest_json="$(ls -t "$BASELINES_DIR"/*.json 2>/dev/null | head -1 || true)"
+    # Bug fix: must select baseline matching current MODEL size, not just newest file.
+    local _model_sz; _model_sz=$(echo "$MODEL" | grep -oP '\d+b' | head -1 || echo "")
+    local latest_json=""
+    while IFS= read -r _f; do
+        [[ -f "$_f" ]] || continue
+        local _bm
+        _bm=$(python3 -c "import json; print(json.load(open('$_f')).get('model',''))" 2>/dev/null || echo "")
+        if [[ -n "$_model_sz" && "$_bm" == *"$_model_sz"* ]]; then
+            latest_json="$_f"
+            break
+        fi
+    done < <(ls -t "$BASELINES_DIR"/*.json 2>/dev/null)
     if [ -n "$latest_json" ]; then
         local bl
         bl="$(grep -oP '"baseline_decode_tok_s":\s*\K[\d.]+' "$latest_json" 2>/dev/null || echo "0")"
         if float_ge "$bl" "1.0"; then
-            log "Using cached baseline: $bl tok/s ($latest_json)"
+            log "Using model-matched baseline ($MODEL): $bl tok/s ($latest_json)"
             echo "$bl"; return 0
         fi
     fi
