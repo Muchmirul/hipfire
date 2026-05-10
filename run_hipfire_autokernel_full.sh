@@ -118,7 +118,7 @@ find_best_candidate_hip() {
     # Priority 2: kernel_lab generated — newest dir with harness_result.json PASS
     local best=""
     while IFS= read -r result_json; do
-        if grep -q '"correctness":"PASS"' "$result_json" 2>/dev/null; then
+        if grep -qE '"correctness"\s*:\s*"PASS"' "$result_json" 2>/dev/null; then
             local dir; dir="$(dirname "$result_json")"
             local hip; hip=$(ls -t "$dir"/candidate_*.hip 2>/dev/null | head -1)
             if [[ -f "$hip" ]]; then
