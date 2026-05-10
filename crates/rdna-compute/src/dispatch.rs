@@ -123,6 +123,8 @@ enum DecodeBackendMode {
 #[derive(Clone, Debug, Default)]
 struct DecodeAutotuneState {
     decided: Option<DecodeBackend>,
+    warmup_calls: u32,
+    switch_count: u32,
     native_samples: u32,
     autokernel_samples: u32,
     native_total_ns: u128,
@@ -169,6 +171,28 @@ fn decode_autotune_samples_per_backend() -> u32 {
     })
 }
 
+fn decode_autotune_warmup_tokens() -> u32 {
+    static CACHE: OnceLock<u32> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_WARMUP_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(32)
+    })
+}
+
+fn decode_autotune_switch_pct() -> f64 {
+    static CACHE: OnceLock<f64> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("HIPFIRE_AUTOKERNEL_SWITCH_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|&v| v >= 0.0)
+            .unwrap_or(2.5)
+    })
+}
+
 fn hipfire_home_dir() -> Option<PathBuf> {
     if let Ok(v) = std::env::var("HIPFIRE_HOME") {
         return Some(PathBuf::from(v));
@@ -176,35 +200,92 @@ fn hipfire_home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".hipfire"))
 }
 
-fn decode_backend_cache_path(arch: &str) -> Option<PathBuf> {
-    hipfire_home_dir().map(|p| p.join("cache").join("autokernel").join(format!("decode_backend_{}.txt", arch)))
+fn decode_backend_cache_path() -> Option<PathBuf> {
+    hipfire_home_dir().map(|p| p.join("cache").join("autokernel").join("decode_backends_v2.tsv"))
 }
 
-fn load_persisted_decode_backend(arch: &str) -> Option<DecodeBackend> {
-    let path = decode_backend_cache_path(arch)?;
-    let s = std::fs::read_to_string(path).ok()?;
-    match s.trim() {
-        "native" => Some(DecodeBackend::Native),
-        "autokernel" => Some(DecodeBackend::Autokernel),
-        _ => None,
+fn load_persisted_decode_backends() -> HashMap<String, DecodeBackend> {
+    let Some(path) = decode_backend_cache_path() else { return HashMap::new(); };
+    let Ok(s) = std::fs::read_to_string(path) else { return HashMap::new(); };
+    let mut map = HashMap::new();
+    for line in s.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let Some(key) = parts.next() else { continue; };
+        let Some(v) = parts.next() else { continue; };
+        let backend = match v {
+            "native" => Some(DecodeBackend::Native),
+            "autokernel" => Some(DecodeBackend::Autokernel),
+            _ => None,
+        };
+        if let Some(b) = backend {
+            map.insert(key.to_string(), b);
+        }
     }
+    map
 }
 
-fn store_persisted_decode_backend(arch: &str, backend: DecodeBackend) {
-    let Some(path) = decode_backend_cache_path(arch) else { return; };
+fn store_persisted_decode_backends(map: &HashMap<String, DecodeBackend>) {
+    let Some(path) = decode_backend_cache_path() else { return; };
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("[hipfire] autokernel tuner: failed to create cache dir: {}", e);
             return;
         }
     }
-    let value = match backend {
-        DecodeBackend::Native => "native\n",
-        DecodeBackend::Autokernel => "autokernel\n",
-    };
+    let mut rows: Vec<(&String, &DecodeBackend)> = map.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    let mut value = String::new();
+    for (k, b) in rows {
+        let backend_s = match b {
+            DecodeBackend::Native => "native",
+            DecodeBackend::Autokernel => "autokernel",
+        };
+        value.push_str(k);
+        value.push('\t');
+        value.push_str(backend_s);
+        value.push('\n');
+    }
     if let Err(e) = std::fs::write(path, value) {
         eprintln!("[hipfire] autokernel tuner: failed to write cache: {}", e);
     }
+}
+
+fn persisted_decode_backends() -> &'static Mutex<HashMap<String, DecodeBackend>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, DecodeBackend>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(load_persisted_decode_backends()))
+}
+
+fn decode_shape_bucket(v: usize) -> usize {
+    const B: usize = 128;
+    if v == 0 {
+        0
+    } else {
+        ((v + B - 1) / B) * B
+    }
+}
+
+fn decode_shape_key_kv(arch: &str, n_kv_heads: usize, head_dim: usize) -> String {
+    format!(
+        "op=kv_asym3;arch={};nkv={};hd={}",
+        arch, n_kv_heads, head_dim,
+    )
+}
+
+fn decode_shape_key_attn(
+    arch: &str,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    max_seq: usize,
+) -> String {
+    format!(
+        "op=attn_asym3;arch={};nh={};nkv={};hd={};maxb={}",
+        arch,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        decode_shape_bucket(max_seq),
+    )
 }
 
 fn decode_autotune_states() -> &'static Mutex<HashMap<String, DecodeAutotuneState>> {
@@ -212,7 +293,93 @@ fn decode_autotune_states() -> &'static Mutex<HashMap<String, DecodeAutotuneStat
     STATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn select_decode_backend(arch: &str) -> (DecodeBackend, bool) {
+fn pick_backend_with_hysteresis(
+    prior: Option<DecodeBackend>,
+    native_samples: u32,
+    native_total_ns: u128,
+    autokernel_samples: u32,
+    autokernel_total_ns: u128,
+) -> DecodeBackend {
+    let default_backend = prior.unwrap_or(DecodeBackend::Native);
+    if native_samples == 0 || autokernel_samples == 0 {
+        return default_backend;
+    }
+
+    let native_avg = native_total_ns as f64 / native_samples as f64;
+    let autokernel_avg = autokernel_total_ns as f64 / autokernel_samples as f64;
+    let pct = decode_autotune_switch_pct() / 100.0;
+
+    if autokernel_avg < native_avg * (1.0 - pct) {
+        DecodeBackend::Autokernel
+    } else if native_avg < autokernel_avg * (1.0 - pct) {
+        DecodeBackend::Native
+    } else {
+        default_backend
+    }
+}
+
+fn finalize_decode_backend(shape_key: &str, arch: &str, state: &mut DecodeAutotuneState) {
+    if state.decided.is_some() {
+        return;
+    }
+
+    let winner = pick_backend_with_hysteresis(
+        state.decided,
+        state.native_samples,
+        state.native_total_ns,
+        state.autokernel_samples,
+        state.autokernel_total_ns,
+    );
+    state.decided = Some(winner);
+
+    {
+        let mut persisted = persisted_decode_backends()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = persisted.insert(shape_key.to_string(), winner) {
+            if prev != winner {
+                state.switch_count += 1;
+                let prev_s = if prev == DecodeBackend::Autokernel { "autokernel" } else { "native" };
+                let new_s = if winner == DecodeBackend::Autokernel { "autokernel" } else { "native" };
+                eprintln!(
+                    "[hipfire] autokernel tuner: switch {} -> {} key={} switch_count={}",
+                    prev_s,
+                    new_s,
+                    shape_key,
+                    state.switch_count,
+                );
+            }
+        }
+        store_persisted_decode_backends(&persisted);
+    }
+
+    let winner_s = if winner == DecodeBackend::Autokernel { "autokernel" } else { "native" };
+    let native_avg = if state.native_samples > 0 {
+        state.native_total_ns / state.native_samples as u128
+    } else {
+        0
+    };
+    let autokernel_avg = if state.autokernel_samples > 0 {
+        state.autokernel_total_ns / state.autokernel_samples as u128
+    } else {
+        0
+    };
+    eprintln!(
+        "[hipfire] autokernel tuner: selected {} on {} key={} (native_avg={}us, autokernel_avg={}us, samples=n{} a{}, switch_pct={}%, warmup_calls={}, switches={})",
+        winner_s,
+        arch,
+        shape_key,
+        native_avg / 1_000,
+        autokernel_avg / 1_000,
+        state.native_samples,
+        state.autokernel_samples,
+        decode_autotune_switch_pct(),
+        state.warmup_calls,
+        state.switch_count,
+    );
+}
+
+fn select_decode_backend(shape_key: &str, arch: &str) -> (DecodeBackend, bool) {
     match decode_backend_mode_from_env() {
         DecodeBackendMode::Force(b) => return (b, false),
         DecodeBackendMode::Auto => {}
@@ -225,14 +392,29 @@ fn select_decode_backend(arch: &str) -> (DecodeBackend, bool) {
     let mut states = decode_autotune_states()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let state = states.entry(arch.to_string()).or_insert_with(|| DecodeAutotuneState {
-        decided: load_persisted_decode_backend(arch),
-        ..DecodeAutotuneState::default()
+    let state = states.entry(shape_key.to_string()).or_insert_with(|| {
+        let persisted = persisted_decode_backends()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(shape_key)
+            .copied();
+        DecodeAutotuneState {
+            decided: persisted,
+            ..DecodeAutotuneState::default()
+        }
     });
 
     if let Some(b) = state.decided {
         return (b, false);
     }
+
+    let warmup = decode_autotune_warmup_tokens();
+    if state.warmup_calls >= warmup {
+        finalize_decode_backend(shape_key, arch, state);
+        return (state.decided.unwrap_or(DecodeBackend::Native), false);
+    }
+
+    state.warmup_calls += 1;
 
     let next = if state.native_samples <= state.autokernel_samples {
         DecodeBackend::Native
@@ -242,7 +424,7 @@ fn select_decode_backend(arch: &str) -> (DecodeBackend, bool) {
     (next, true)
 }
 
-fn record_decode_backend_sample(arch: &str, backend: DecodeBackend, elapsed: Duration) {
+fn record_decode_backend_sample(shape_key: &str, arch: &str, backend: DecodeBackend, elapsed: Duration) {
     if !decode_autotune_enabled_for_arch(arch) {
         return;
     }
@@ -250,9 +432,16 @@ fn record_decode_backend_sample(arch: &str, backend: DecodeBackend, elapsed: Dur
     let mut states = decode_autotune_states()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let state = states.entry(arch.to_string()).or_insert_with(|| DecodeAutotuneState {
-        decided: load_persisted_decode_backend(arch),
-        ..DecodeAutotuneState::default()
+    let state = states.entry(shape_key.to_string()).or_insert_with(|| {
+        let persisted = persisted_decode_backends()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(shape_key)
+            .copied();
+        DecodeAutotuneState {
+            decided: persisted,
+            ..DecodeAutotuneState::default()
+        }
     });
     if state.decided.is_some() {
         return;
@@ -271,28 +460,14 @@ fn record_decode_backend_sample(arch: &str, backend: DecodeBackend, elapsed: Dur
     }
 
     let need = decode_autotune_samples_per_backend();
-    if state.native_samples < need || state.autokernel_samples < need {
+    let warmup = decode_autotune_warmup_tokens();
+    let enough_samples = state.native_samples >= need && state.autokernel_samples >= need;
+    let warmup_done = state.warmup_calls >= warmup;
+    if !enough_samples && !warmup_done {
         return;
     }
 
-    let native_avg = state.native_total_ns / state.native_samples as u128;
-    let autokernel_avg = state.autokernel_total_ns / state.autokernel_samples as u128;
-    let winner = if autokernel_avg < native_avg {
-        DecodeBackend::Autokernel
-    } else {
-        DecodeBackend::Native
-    };
-    state.decided = Some(winner);
-    store_persisted_decode_backend(arch, winner);
-    let winner_s = if winner == DecodeBackend::Autokernel { "autokernel" } else { "native" };
-    eprintln!(
-        "[hipfire] autokernel tuner: selected {} on {} (native_avg={}us, autokernel_avg={}us, samples={} each)",
-        winner_s,
-        arch,
-        native_avg / 1_000,
-        autokernel_avg / 1_000,
-        need,
-    );
+    finalize_decode_backend(shape_key, arch, state);
 }
 
 fn log_decode_backend_once(arch: &str, backend: DecodeBackend, tuning: bool) {
@@ -12186,7 +12361,8 @@ impl Gpu {
         n_kv_heads: usize, head_dim: usize,
     ) -> HipResult<()> {
         self.bind_thread()?;
-        let (decode_backend, tune_measure) = select_decode_backend(&self.arch);
+        let decode_shape = decode_shape_key_kv(&self.arch, n_kv_heads, head_dim);
+        let (decode_backend, tune_measure) = select_decode_backend(&decode_shape, &self.arch);
         log_decode_backend_once(&self.arch, decode_backend, tune_measure);
         let tune_start = if tune_measure {
             self.hip.device_synchronize()?;
@@ -12239,7 +12415,7 @@ impl Gpu {
             let result = self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
             if let Some(start) = tune_start {
                 self.hip.device_synchronize()?;
-                record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
+                record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
             }
             return result;
         }
@@ -12277,7 +12453,7 @@ impl Gpu {
         let result = self.kv_cache_write_q8_0(v_dst, v_src, pos_buf, n_kv_heads, head_dim);
         if let Some(start) = tune_start {
             self.hip.device_synchronize()?;
-            record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
+            record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
         }
         result
     }
@@ -12682,7 +12858,14 @@ impl Gpu {
         partials: &GpuTensor,
     ) -> HipResult<()> {
         self.bind_thread()?;
-        let (decode_backend, tune_measure) = select_decode_backend(&self.arch);
+        let decode_shape = decode_shape_key_attn(
+            &self.arch,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            max_seq,
+        );
+        let (decode_backend, tune_measure) = select_decode_backend(&decode_shape, &self.arch);
         log_decode_backend_once(&self.arch, decode_backend, tune_measure);
         let tune_start = if tune_measure {
             self.hip.device_synchronize()?;
@@ -12791,7 +12974,7 @@ impl Gpu {
             }
             if let Some(start) = tune_start {
                 self.hip.device_synchronize()?;
-                record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
+                record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
             }
             return Ok(());
         }
@@ -12875,7 +13058,7 @@ impl Gpu {
         }
         if let Some(start) = tune_start {
             self.hip.device_synchronize()?;
-            record_decode_backend_sample(&self.arch, decode_backend, start.elapsed());
+            record_decode_backend_sample(&decode_shape, &self.arch, decode_backend, start.elapsed());
         }
         Ok(())
     }
