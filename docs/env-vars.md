@@ -317,12 +317,6 @@ Flash-attention dispatch.
 - `HIPFIRE_ATTN_FLASH` — flash-attention mode override. Maps to `cfg.flash_mode`.
 - `HIPFIRE_FLASH_PARTIALS_BATCH` — batch size for partial-flash kernels.
 
-### `AUTOKERNEL` (1)
-
-Optional decode-only backend slice (Radeon/HIP path). Default-safe fallback remains native.
-
-- `HIPFIRE_AUTOKERNEL_DECODE` — `1|true|on` enables autokernel-backed asym3 decode launch path (KV write + flash-attn dispatch); `0|false|off` forces native path (default).
-
 ### `MULTI-GPU` daemon-runtime helpers
 
 - `HIPFIRE_LOCAL` — bench-mode local-only flag.

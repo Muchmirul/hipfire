@@ -132,26 +132,6 @@ the prefill MMQ redesign log is at
 | [multi-gpu.md](docs/multi-gpu.md) | Pipeline-parallel (pp≥2) — memory budget, deployment, refusals |
 | [methodology/perf-benchmarking.md](docs/methodology/perf-benchmarking.md) | Bench protocol — read before claiming a perf win |
 
-## Optional autokernel decode path (Radeon)
-
-hipfire ships a guarded first-slice autokernel integration for the
-decode hot path (asym3 KV write + flash-attention launch path):
-
-```bash
-# default-safe path (fallback)
-HIPFIRE_AUTOKERNEL_DECODE=0 hipfire run qwen3.5:9b "..."
-
-# opt-in autokernel decode path
-HIPFIRE_AUTOKERNEL_DECODE=1 hipfire run qwen3.5:9b "..."
-```
-
-- Default is **off** (fallback/native path).
-- Runtime logs the active decode backend once on first asym3 decode call.
-- Requires the existing HIP/ROCm runtime already used by hipfire (no extra dependency).
-- Current slice is decode-focused; prefill path is unchanged.
-- For A/B perf, use `bench_qwen35_mq4` and compare `prefill_tok_s` and
-  `gen_tok_s` separately (see `docs/BENCHMARKS.md`).
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
