@@ -104,46 +104,52 @@ latest_decision() {
     grep -oP '\*\*Decision: \K[A-Z_]+' "$latest" 2>/dev/null | head -1 || echo "UNKNOWN"
 }
 
-# Find the best promotable candidate .hip file.
-# Prefers harness_result.json with PASS, then newest candidate_*.hip overall.
-find_best_candidate_hip() {
-    # Priority 1: accepted workspace candidates that have a .hip file nearby
-    local acc_hip
-    acc_hip=$(ls -t "$TOOL_DIR/workspace/accepted/"*.hip 2>/dev/null | head -1)
-    if [[ -f "$acc_hip" ]]; then
-        echo "$acc_hip"
-        return
-    fi
+# Return all promotable candidate .hip files, sorted by harness speedup descending.
+# Skips candidates already present in accepted_promotions/ (already wired into hipfire).
+# Output: one absolute path per line.
+find_all_candidate_hips_sorted() {
+    local already_promoted_dir="$TOOL_DIR/workspace/accepted_promotions"
 
-    # Priority 2: kernel_lab generated — newest dir with harness_result.json PASS
-    local best=""
+    # Collect all passing harness candidates with their speedup scores.
+    # Format: "<speedup_float> <hip_file_path>"
+    local -a scored=()
+
+    # Source 1: workspace/accepted/ — passed loop's quick benchmark, not yet in hipfire
+    while IFS= read -r hip; do
+        [[ -f "$hip" ]] || continue
+        local base; base="$(basename "$hip")"
+        # Skip if already promoted (same filename in accepted_promotions/)
+        if ls "$already_promoted_dir"/"${base%.*}"_*.hip "$already_promoted_dir/$base" \
+               2>/dev/null | grep -q .; then
+            continue
+        fi
+        scored+=("1.0000 $hip")  # no harness speedup recorded; treat as neutral
+    done < <(ls -t "$TOOL_DIR/workspace/accepted/"*.hip 2>/dev/null)
+
+    # Source 2: kernel_lab generated — pick the best .hip per target dir by speedup
     while IFS= read -r result_json; do
         if grep -qE '"correctness"\s*:\s*"PASS"' "$result_json" 2>/dev/null; then
             local dir; dir="$(dirname "$result_json")"
+            # Extract speedup_vs_ref (handles spaces around colon and quotes)
+            local spd
+            spd=$(grep -oE '"speedup_vs_ref"\s*:\s*"[0-9.]+"' "$result_json" \
+                      2>/dev/null | grep -oE '[0-9.]+' | tail -1)
+            spd="${spd:-1.0000}"
+            # Pick the highest-numbered candidate .hip (newest within this dir)
             local hip; hip=$(ls -t "$dir"/candidate_*.hip 2>/dev/null | head -1)
             if [[ -f "$hip" ]]; then
-                best="$hip"
-                break
+                scored+=("$spd $hip")
             fi
         fi
-    done < <(find "$TOOL_DIR/kernel_lab/generated" -name "harness_result.json" \
-                  -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk '{print $2}')
+    done < <(find "$TOOL_DIR/kernel_lab/generated" -name "harness_result.json" 2>/dev/null)
 
-    if [[ -n "$best" ]]; then
-        echo "$best"
-        return
-    fi
+    # Sort by speedup descending, emit only the path
+    printf '%s\n' "${scored[@]}" | sort -rn | awk '{print $2}'
+}
 
-    # Priority 3: newest candidate_*.hip anywhere under generated/
-    local newest
-    newest=$(find "$TOOL_DIR/kernel_lab/generated" -name "candidate_*.hip" \
-                  -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | awk '{print $2}')
-    if [[ -f "$newest" ]]; then
-        echo "$newest"
-        return
-    fi
-
-    echo ""
+# Compatibility wrapper — returns only the single best candidate.
+find_best_candidate_hip() {
+    find_all_candidate_hips_sorted | head -1
 }
 
 write_summary() {
@@ -242,13 +248,7 @@ INITIAL_DECISION="$(latest_decision)"
 log "  Initial decision: ${C_BOLD}$INITIAL_DECISION${C_RESET}"
 
 if [[ "$INITIAL_DECISION" == "PASS_ADOPTED" ]]; then
-    log_ok "hipfire already in PASS_ADOPTED state — nothing more to do."
-    FINAL_DECISION="PASS_ADOPTED"
-    write_summary
-    echo ""
-    echo -e "${C_BOLD}═══ DONE ═══${C_RESET}  Decision: ${C_GREEN}PASS_ADOPTED${C_RESET}"
-    echo "  Summary: $SUMMARY_MD"
-    exit 0
+    log_ok "hipfire in PASS_ADOPTED state — continuing loop to search for further improvements."
 fi
 
 if [[ "$INITIAL_DECISION" == "FAIL" && "$FORCE_CONTINUE" != "1" ]]; then
@@ -270,7 +270,8 @@ if [[ -z "$CANDIDATE_DIR" ]]; then
     AUTOCOMMIT="$AUTOCOMMIT" \
     RUN_FINAL_VALIDATE="$RUN_FINAL_VALIDATE" \
         bash "$TOOL_DIR/autokernel_loop.sh" || true
-    LOOP_RAN=$MAX_ITERS
+    # Count rows added to results.tsv during this run as a proxy for iterations
+    LOOP_RAN=$(wc -l < "$TOOL_DIR/results.tsv" 2>/dev/null || echo "$MAX_ITERS")
     log "  Loop finished."
 else
     log "Step 3: CANDIDATE_DIR set — skipping search loop."
@@ -320,17 +321,35 @@ fi
 PROMOTED_CANDIDATE="$BEST_CANDIDATE_HIP"
 log_ok "  Candidate: $BEST_CANDIDATE_HIP"
 
-# ── Step 5: Promote ──────────────────────────────────────────────────────────
-log "Step 5: Promoting candidate via promote_kernel.sh..."
+# ── Step 5: Promote — try all passing candidates in speedup order ─────────────
+log "Step 5: Promoting candidate(s) via promote_kernel.sh..."
 PROMOTE_RAN=1
 
-ARCH="$ARCH" \
-MODEL="$MODEL" \
-CANDIDATE="$BEST_CANDIDATE_HIP" \
-ACCEPT_MIN_SPEEDUP="$ACCEPT_MIN_SPEEDUP" \
-AUTOCOMMIT="$AUTOCOMMIT" \
-SKIP_COHERENCE="$SKIP_COHERENCE" \
-    bash "$TOOL_DIR/promote_kernel.sh" || true
+# Build the full ranked list; user-supplied candidate is always first.
+if [[ -n "$CANDIDATE_DIR" ]]; then
+    ALL_CANDIDATES=("$BEST_CANDIDATE_HIP")
+else
+    mapfile -t ALL_CANDIDATES < <(find_all_candidate_hips_sorted)
+    # Put the already-selected best first (it's already #1 but be explicit)
+    [[ ${#ALL_CANDIDATES[@]} -eq 0 ]] && ALL_CANDIDATES=("$BEST_CANDIDATE_HIP")
+fi
+
+PROMOTE_ACCEPTED=0
+for _cand in "${ALL_CANDIDATES[@]}"; do
+    [[ -f "$_cand" ]] || continue
+    log "  Trying candidate: $_cand"
+    ARCH="$ARCH" \
+    MODEL="$MODEL" \
+    CANDIDATE="$_cand" \
+    ACCEPT_MIN_SPEEDUP="$ACCEPT_MIN_SPEEDUP" \
+    AUTOCOMMIT="$AUTOCOMMIT" \
+    SKIP_COHERENCE="$SKIP_COHERENCE" \
+        bash "$TOOL_DIR/promote_kernel.sh" && PROMOTE_ACCEPTED=1 && break || true
+done
+
+if [[ $PROMOTE_ACCEPTED -eq 0 ]]; then
+    log_warn "  All ${#ALL_CANDIDATES[@]} candidate(s) rejected by promote_kernel.sh."
+fi
 
 # ── Step 6: Final validation ──────────────────────────────────────────────────
 log "Step 6: Running final_validate.sh (post-promotion)..."
