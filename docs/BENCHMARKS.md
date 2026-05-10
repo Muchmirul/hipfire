@@ -115,3 +115,26 @@ For DFlash perf comparison, use the prompt-md5-pinned scripts in
 `benchmarks/prompts/` — see `methodology/perf-benchmarking.md` for why
 prompt structure matters as much as model + flags (one stray newline
 swings τ by 17%).
+
+### Optional autokernel decode A/B (first integration slice)
+
+Use the decode-focused bench example and compare baseline vs opt-in:
+
+```bash
+# Baseline (native decode path)
+HIPFIRE_AUTOKERNEL_DECODE=0 HIPFIRE_KV_MODE=asym3 \
+  ./target/release/examples/bench_qwen35_mq4 ~/.hipfire/models/qwen3.5-9b.mq4 --prefill 128 --warmup 10 --gen 60
+
+# Autokernel-backed decode path
+HIPFIRE_AUTOKERNEL_DECODE=1 HIPFIRE_KV_MODE=asym3 \
+  ./target/release/examples/bench_qwen35_mq4 ~/.hipfire/models/qwen3.5-9b.mq4 --prefill 128 --warmup 10 --gen 60
+```
+
+Interpretation:
+- `prefill_tok_s`: should remain close (path is decode-only today).
+- `gen_tok_s`: primary KPI for this integration slice.
+
+Guardrails:
+- Fallback remains default (`HIPFIRE_AUTOKERNEL_DECODE` unset/0).
+- Validate correctness with `./scripts/coherence-gate.sh` after changes
+  touching decode dispatch.
