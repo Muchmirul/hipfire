@@ -2,12 +2,19 @@
 # tools/autokernel-rdna/autokernel_loop.sh
 #
 # Phase 13 — Autonomous AutoKernel-style optimization loop for hipfire on gfx1201.
+# Phase 14 — Real kernel-authoring mode (AUTHOR_KERNEL=1): generates new HIP kernel
+#             candidates via author_kernel.sh, evaluates in isolated harnesses, promotes
+#             winners to kernels/src/ before wiring into hipfire.
 # Primary target: Qwen3.5-27B decode throughput.
 #
-# Usage (short run):
+# Usage (Phase 13 — sed-mutation loop):
 #   ARCH=gfx1201 MODEL=qwen3.5:27b MAX_ITERS=100 ./tools/autokernel-rdna/autokernel_loop.sh
 #
-# Overnight aggressive:
+# Usage (Phase 14 — kernel authoring mode):
+#   ARCH=gfx1201 MODEL=qwen3.5:27b AUTHOR_KERNEL=1 MAX_ITERS=50 \
+#     ACCEPT_MIN_SPEEDUP=1.005 ./tools/autokernel-rdna/autokernel_loop.sh
+#
+# Overnight aggressive (Phase 13):
 #   ARCH=gfx1201 MODEL=qwen3.5:27b MAX_ITERS=300 ACCEPT_MIN_SPEEDUP=1.005 AUTOCOMMIT=1 \
 #     ./tools/autokernel-rdna/autokernel_loop.sh
 #
@@ -39,6 +46,12 @@ BENCH_TRIALS="${BENCH_TRIALS:-3}"
 ALLOW_OTHER_ARCH="${ALLOW_OTHER_ARCH:-0}"
 RUN_FINAL_VALIDATE="${RUN_FINAL_VALIDATE:-0}"
 CRASH_STRATEGY_LIMIT="${CRASH_STRATEGY_LIMIT:-3}"
+
+# Phase 14 — Real kernel-authoring mode
+# Set AUTHOR_KERNEL=1 to generate new .hip kernel candidates and evaluate them
+# in isolated harnesses before wiring into hipfire. Uses author_kernel.sh.
+AUTHOR_KERNEL="${AUTHOR_KERNEL:-0}"
+KERNEL_LAB_DIR="${KERNEL_LAB_DIR:-}"   # set in main() after TOOL_DIR is resolved
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths
@@ -437,6 +450,26 @@ pick_strategy() {
     already_tried="$(get_strategies_tried "$target" 2>/dev/null | sort | tr '\n' '|')"
 
     local strategies=()
+
+    # Phase 14: author-kernel mode — return LLM-authoring strategy names.
+    # author_kernel.sh must have been sourced before pick_strategy is called.
+    if [ "${AUTHOR_KERNEL:-0}" = "1" ]; then
+        local strats_var="AUTHOR_STRATEGIES_$(echo "$target" | tr '-' '_')"
+        if declare -p "$strats_var" &>/dev/null 2>&1; then
+            eval "strategies=(\"\${${strats_var}[@]}\")"
+        else
+            # Fallback authoring strategies if target-specific list is not defined
+            strategies=("author_gemv_lds_staging_x" "author_gemv_uint4_loads"
+                        "author_gemv_8acc_ilp" "author_gemv_scale_broadcast")
+        fi
+        for s in "${strategies[@]}"; do
+            if ! echo "|${already_tried}" | grep -qF "|${s}|"; then
+                echo "$s"; return 0
+            fi
+        done
+        echo "EXHAUSTED"; return 1
+    fi
+
     case "$target" in
         gemv_hfq4g256|gemv_hfq6g256)
             # Pure memory-bandwidth GEMV: tune launch bounds, try small occupancy changes
@@ -576,9 +609,10 @@ apply_strategy() {
 # ─────────────────────────────────────────────────────────────────────────────
 # TSV logging — appends one row to results.tsv
 # Phase 13 schema extends Phase 12 with 7 additional columns at the end.
+# Phase 14 schema extends Phase 13 with 9 additional columns (author-kernel mode).
 # ─────────────────────────────────────────────────────────────────────────────
 log_tsv_row() {
-    # All 39 fields; trailing fields will be blank for pre-Phase-13 rows.
+    # Variadic: 39 fields (Phase 13) or 48 fields (Phase 14). Trailing fields blank for older rows.
     local fields=("$@")
     local row; row=$(printf '%s\t' "${fields[@]}")
     row="${row%$'\t'}"
@@ -838,10 +872,25 @@ trap _cleanup SIGINT SIGTERM
 # Main loop
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
-    hdr "AutoKernel Loop — Phase 13"
+    hdr "AutoKernel Loop — Phase 13/14  (AUTHOR_KERNEL=${AUTHOR_KERNEL})"
     log "ARCH=$ARCH  MODEL=$MODEL  MAX_ITERS=$MAX_ITERS"
     log "ACCEPT_MIN_SPEEDUP=$ACCEPT_MIN_SPEEDUP  AUTOCOMMIT=$AUTOCOMMIT  TIMEOUT=${TIMEOUT_SECONDS}s"
     echo "" >&2
+
+    # Resolve KERNEL_LAB_DIR now that TOOL_DIR is available
+    KERNEL_LAB_DIR="${KERNEL_LAB_DIR:-$TOOL_DIR/kernel_lab}"
+
+    # Phase 14: source author_kernel.sh to make author_kernel_iteration() available
+    if [ "${AUTHOR_KERNEL:-0}" = "1" ]; then
+        local author_script="$TOOL_DIR/author_kernel.sh"
+        if [ ! -f "$author_script" ]; then
+            err "AUTHOR_KERNEL=1 but author_kernel.sh not found at: $author_script"
+            exit 1
+        fi
+        # shellcheck source=author_kernel.sh
+        source "$author_script"
+        log "Phase 14 author-kernel mode ACTIVE. kernel_lab: $KERNEL_LAB_DIR"
+    fi
 
     # ── Setup ────────────────────────────────────────────────────────────────
     mkdir -p "$WORKSPACE" "$CANDIDATES_DIR" "$ACCEPTED_DIR" "$REJECTED_DIR" "$REPORTS_DIR"
@@ -942,6 +991,71 @@ main() {
             continue
         fi
         log "Strategy: $strategy"
+
+        # ── Phase 14: author-kernel mode ─────────────────────────────────────
+        if [ "${AUTHOR_KERNEL:-0}" = "1" ]; then
+            # author_kernel_iteration() sets: AK_CORRECTNESS, AK_HARNESS_SPEEDUP,
+            # AK_PROMOTED, AK_HIPFIRE_TOK_S, AK_DECISION, AK_CANDIDATE_PATH
+            author_kernel_iteration "$current_target" "$iter" "$strategy"
+
+            local ak_spec_path="kernel_lab/generated/${current_target}/target_spec.json"
+            local ak_cand_path="${AK_CANDIDATE_PATH:-}"
+            local ak_hipfire_before="$baseline_tok_s"
+            local ak_hipfire_after="${AK_HIPFIRE_TOK_S:-0}"
+            local ak_speedup="${AK_HARNESS_SPEEDUP:-0}"
+
+            # TSV row (48 fields: 39 Phase-13 + 9 Phase-14)
+            log_tsv_row \
+                "exp-ph14-$(printf '%04d' $iter)" "$(ts_iso)" "$base_sha" "$(git_sha)" \
+                "$ARCH" "" "" "$MODEL" "mq4" "q8" \
+                "$prompt_name" "$prompt_md5" \
+                "$current_target" "" "$strategy" \
+                "SKIP" "SKIP" "SKIP" \
+                "$baseline_tok_s" "${ak_hipfire_after}" "0" \
+                "0" "0" "0" "0" "0" \
+                "0" "0" "0" \
+                "$AK_DECISION" "" "" \
+                "$iter" "$current_target" "$strategy" "${ak_cand_path}" \
+                "${AK_CORRECTNESS:-FAIL}" "$baseline_tok_s" "$current_best" \
+                "${ak_hipfire_after}" "$ak_speedup" "1.0" \
+                "1" "$ak_spec_path" "${ak_cand_path}" \
+                "${AK_CORRECTNESS:-FAIL}" "$ak_speedup" \
+                "${AK_PROMOTED:-0}" "$ak_hipfire_before" "$ak_hipfire_after" \
+                "$AK_DECISION"
+
+            record_strategy_tried "$current_target" "$strategy"
+            increment_attempts "$current_target"
+            update_state "total_iterations=$iter"
+
+            if [ "${AK_DECISION:-SKIP}" = "ACCEPT" ]; then
+                current_best="${ak_hipfire_after:-$current_best}"
+                update_state "best_tok_s=$current_best" \
+                             "best_speedup=$(float_div "$current_best" "$baseline_tok_s")" \
+                             "next_action=CONTINUE" "last_decision=KEEP"
+                consecutive_failures=0
+                if [ "${AUTOCOMMIT:-0}" = "1" ]; then
+                    git -C "$REPO_ROOT" add "kernels/src/${current_target}.gfx1201.hip" 2>/dev/null || true
+                    git -C "$REPO_ROOT" commit -m "autokernel(ph14): author ${current_target} for $ARCH
+
+Strategy: $strategy
+Harness speedup: ${ak_speedup}x
+E2E tok/s: ${ak_hipfire_before} -> ${ak_hipfire_after}
+Iteration: $iter" 2>/dev/null || warn "git commit failed"
+                fi
+            else
+                consecutive_failures=$((consecutive_failures + 1))
+            fi
+
+            local new_attempts_ak; new_attempts_ak="$(get_attempts "$current_target")"
+            if [ "$new_attempts_ak" -ge "$MAX_ATTEMPTS_PER_TARGET" ]; then
+                log "Max attempts for '$current_target' (author mode) — advancing"
+                current_target="$(advance_target)"
+                update_state "current_target=$current_target"
+                [ -z "$current_target" ] && { warn "All targets exhausted"; break; }
+            fi
+            [ "$LOOP_RUNNING" = "2" ] && break
+            continue
+        fi
 
         # ── Resolve kernel variant file ──────────────────────────────────────
         local src_base="$KERNELS_SRC/$current_target"

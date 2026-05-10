@@ -1,0 +1,52 @@
+{
+  "_comment": "Target spec for gemv_hfq4g256_residual — Phase 14 kernel authoring.",
+  "kernel_name": "gemv_hfq4g256_residual",
+  "kernel_func_name": "gemv_hfq4g256_residual",
+  "kernel_purpose": "Fused HFQ4-G256 GEMV with residual add: y = A*x + residual. Saves one kernel launch and the residual write round-trip to HBM. Used in the residual path of Q/K/V/O projections.",
+  "source_file": "kernels/src/gemv_hfq4g256_residual.hip",
+  "gfx1201_variant": null,
+  "gfx12_variant": "kernels/src/gemv_hfq4g256_residual.gfx12.hip",
+  "_gfx12_note": "A gfx12 variant may exist; check kernels/src/ at runtime. The harness script checks for it.",
+  "dispatch_path": "crates/rdna-compute/src/kernels.rs",
+  "dispatch_fn": "gemv_hfq4g256_residual_for_arch()",
+  "arch": "gfx1201",
+  "quant_format": "HFQ4-G256",
+  "group_size": 256,
+  "group_bytes": 136,
+  "weight_bits": 4,
+  "weights_per_group": 256,
+  "kernel_args": [
+    {"name": "A",        "type": "const char* __restrict__",  "desc": "packed weight matrix"},
+    {"name": "x",        "type": "const float* __restrict__", "desc": "input vector, float32, length K"},
+    {"name": "residual", "type": "const float* __restrict__", "desc": "residual vector, float32, length M"},
+    {"name": "y",        "type": "float* __restrict__",        "desc": "output = GEMV(A,x) + residual, float32, length M"},
+    {"name": "M",        "type": "int",                        "desc": "output rows"},
+    {"name": "K",        "type": "int",                        "desc": "input cols"}
+  ],
+  "launch_config": {
+    "grid": "(M, 1, 1)",
+    "block": "(32, 1, 1)",
+    "shared_mem_bytes": 0
+  },
+  "decode_runtime_share": 0.12,
+  "prefill_runtime_share": 0.00,
+  "amdahl_e2e_at_1_3x": 1.0349,
+  "correctness": {
+    "tolerance_abs": 1e-3,
+    "tolerance_rel": 1e-4,
+    "check_method": "element-wise max abs diff vs reference (gemv_hfq4g256 output + residual)"
+  },
+  "benchmark_command": "ARCH=gfx1201 MODEL=qwen3.5:27b BENCH_TRIALS=3 ./tools/autokernel-rdna/run.sh baseline",
+  "correctness_command": "./scripts/coherence-gate-dflash.sh",
+  "harness": "tools/autokernel-rdna/kernel_lab/harnesses/gemv_hfq4g256_residual_harness.sh",
+  "candidate_dir": "tools/autokernel-rdna/kernel_lab/generated/gemv_hfq4g256_residual/",
+  "promotion_target": "kernels/src/gemv_hfq4g256_residual.gfx1201.hip",
+  "rollback": "git checkout kernels/src/gemv_hfq4g256_residual.gfx1201.hip crates/rdna-compute/src/kernels.rs",
+  "known_negative_results": [
+    {
+      "phase": "Phase 10",
+      "description": "__builtin_amdgcn_s_prefetch adds overhead on gfx1201 in the residual path — do NOT use prefetch in this kernel without re-measuring.",
+      "lesson": "Prefetch hurts on RDNA4 for short-stride patterns. Try LDS staging of residual[] instead."
+    }
+  ]
+}

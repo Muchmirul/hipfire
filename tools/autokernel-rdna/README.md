@@ -170,7 +170,7 @@ touch .autokernel_stop
 
 | Path | Contents |
 |------|----------|
-| `tools/autokernel-rdna/results.tsv` | All iterations appended (39 cols) |
+| `tools/autokernel-rdna/results.tsv` | All iterations appended (48 cols: 32 core + 7 Phase 13 + 9 Phase 14) |
 | `tools/autokernel-rdna/workspace/orchestration_state.json` | Current loop state (resume on restart) |
 | `tools/autokernel-rdna/workspace/candidates/iter-NNN/` | diff + build log for each iteration |
 | `tools/autokernel-rdna/workspace/accepted/` | Diffs of all accepted candidates |
@@ -239,3 +239,91 @@ touch .autokernel_stop
 | `benchmark_status` | `ok` / `timeout` / `crash` / `build_fail` / `correctness_fail` |
 | `current_best_tok_s` | Best tok/s seen so far in this loop run |
 | `speedup_vs_current_best` | `candidate_decode_tok_s / current_best_tok_s` |
+
+**Phase 14 author-kernel columns** (present only in rows written with `AUTHOR_KERNEL=1`):
+
+| Column | Description |
+|--------|-------------|
+| `author_kernel_mode` | `1` when this row was written by Phase 14 |
+| `target_spec_path` | Path to `kernel_lab/generated/<target>/target_spec.json` |
+| `candidate_kernel_path` | Path to the generated candidate `.hip` file |
+| `harness_correctness_status` | Result from `kernel_lab/harnesses/<target>_harness.sh` (PASS/FAIL) |
+| `harness_speedup` | Standalone harness speedup vs reference kernel |
+| `promoted_to_hipfire` | `1` if candidate was copied to `kernels/src/` and rebuilt |
+| `hipfire_tok_s_before` | End-to-end tok/s before promotion (baseline) |
+| `hipfire_tok_s_after` | End-to-end tok/s after promotion (0 if not promoted) |
+| `final_decision` | ACCEPT / REJECT / SKIP (from `author_kernel_iteration()`) |
+
+---
+
+## Phase 14 — Real Kernel-Authoring Mode
+
+Phase 14 extends the loop to generate genuinely new HIP kernel code (not just text
+mutations), test it in isolated harnesses, and promote winners into hipfire.
+
+### How to run
+
+```bash
+# Author new kernel candidates for the top-3 decode targets (50 iterations):
+ARCH=gfx1201 MODEL=qwen3.5:27b AUTHOR_KERNEL=1 MAX_ITERS=50 ACCEPT_MIN_SPEEDUP=1.005 \
+  ./tools/autokernel-rdna/autokernel_loop.sh
+```
+
+### Architecture
+
+```
+author_kernel.sh              # Orchestrates one authoring cycle
+  ↓
+extract_target_spec()         # Reads kernels/src/<target>.hip, emits target_spec.json
+  ↓
+generate_candidate_skeleton() # Copies reference to kernel_lab/generated/<target>/candidate_N.hip
+                              # with authoring header comment (strategy + invariants)
+  ↓
+  [LLM agent edits candidate_N.hip per the strategy instructions]
+  ↓
+run_harness()                 # Fixed harness: compile candidate → correctness check → timing
+  ↓                           # Script: kernel_lab/harnesses/<target>_harness.sh
+  if PASS && speedup >= threshold
+  ↓
+promote_to_hipfire()          # cp candidate_N.hip → kernels/src/<target>.gfx1201.hip
+  ↓                           # cargo build --release
+  ↓
+E2E bench (3 trials)          # Final accept/revert decision
+```
+
+### Key directories
+
+| Path | Contents |
+|------|----------|
+| `kernel_lab/templates/hip_kernel_candidate.md` | Agent instruction template (strategy, invariants, gfx1201 tips) |
+| `kernel_lab/generated/<target>/target_spec.json` | Per-target spec (shapes, tolerance, dispatch path) |
+| `kernel_lab/generated/<target>/candidate_N.hip` | Generated candidates |
+| `kernel_lab/harnesses/<target>_harness.sh` | Fixed evaluator (NEVER modified during run) |
+| `kernel_lab/reports/` | Phase 14 summary reports |
+
+### Harness outputs
+
+Each harness prints to stdout:
+
+```
+CORRECTNESS: PASS|FAIL
+LATENCY_US: <float>        # candidate latency
+REF_LATENCY_US: <float>    # reference latency (same test shape)
+SPEEDUP_VS_REF: <float>    # ref / cand (higher = faster candidate)
+ERROR: <msg>               # only on FAIL
+```
+
+### Hard rules
+
+1. **Correctness is a hard gate.** Harness FAIL → no promotion, no e2e bench.
+2. **Harness is fixed.** Never modify `harnesses/*.sh` during a run.
+3. **Fallback kernel is never deleted.** `kernels/src/<target>.hip` always exists as oracle.
+4. **4-accumulator invariant** in `gemv_hfq4g256` must be preserved. Tail group g uses `acc[g % N_ACCUMULATORS]`. Any candidate that changes this fails the harness.
+5. **Revert on e2e rejection** — promoted kernel is `git checkout`'d back if e2e tok/s falls below threshold.
+
+### Known limitations
+
+- **Skeleton-only mode:** `generate_candidate_skeleton()` copies the reference kernel as-is. In fully automated runs (no LLM agent edits the candidate), the harness reports 1.000x and the loop rejects. This is intentional — Phase 14 is designed to evaluate *human or LLM-authored* kernel code, not to apply automatic mutations.
+- **gemv_hfq6g256 harness CPU reference assumes 4-weights-per-3-bytes packing.** Verify against `kernels/src/gemv_hfq6g256.hip` before trusting PASS results.
+- **Build time:** promotion triggers `cargo build --release` (5–10 min). Budget accordingly.
+- **No MoE support:** MQ3 + MoE/A3B is refused at load time (inherited from AGENTS.md). Authoring targets are dense-model GEMV only.

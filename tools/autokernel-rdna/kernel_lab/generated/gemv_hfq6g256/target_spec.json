@@ -1,0 +1,45 @@
+{
+  "_comment": "Target spec for gemv_hfq6g256 — Phase 14 kernel authoring.",
+  "kernel_name": "gemv_hfq6g256",
+  "kernel_func_name": "gemv_hfq6g256",
+  "kernel_purpose": "Dequantize-and-matvec for HFQ6-G256 weight format (6-bit quantization, 256 weights/group). Called for HFQ6-quantized projections in Qwen3.5-27B where higher precision is needed.",
+  "source_file": "kernels/src/gemv_hfq6g256.hip",
+  "gfx1201_variant": null,
+  "gfx12_variant": null,
+  "dispatch_path": "crates/rdna-compute/src/kernels.rs",
+  "dispatch_fn": "gemv_hfq6g256_for_arch()",
+  "arch": "gfx1201",
+  "quant_format": "HFQ6-G256",
+  "group_size": 256,
+  "group_bytes": 200,
+  "_group_bytes_note": "6 bits * 256 = 1536 bits = 192 bytes payload + 8 bytes header (scale+zp) = 200 bytes",
+  "weight_bits": 6,
+  "weights_per_group": 256,
+  "kernel_args": [
+    {"name": "A",    "type": "const char* __restrict__",  "desc": "packed weight matrix, HFQ6 groups"},
+    {"name": "x",    "type": "const float* __restrict__", "desc": "input vector, float32, length K"},
+    {"name": "y",    "type": "float* __restrict__",        "desc": "output vector, float32, length M"},
+    {"name": "M",    "type": "int",                        "desc": "output rows"},
+    {"name": "K",    "type": "int",                        "desc": "input cols (multiple of 256)"}
+  ],
+  "launch_config": {
+    "grid": "(M, 1, 1)",
+    "block": "(32, 1, 1)",
+    "shared_mem_bytes": 0
+  },
+  "decode_runtime_share": 0.18,
+  "prefill_runtime_share": 0.01,
+  "amdahl_e2e_at_1_3x": 1.0503,
+  "correctness": {
+    "tolerance_abs": 1e-3,
+    "tolerance_rel": 1e-4,
+    "check_method": "element-wise max abs diff vs reference"
+  },
+  "benchmark_command": "ARCH=gfx1201 MODEL=qwen3.5:27b BENCH_TRIALS=3 ./tools/autokernel-rdna/run.sh baseline",
+  "correctness_command": "./scripts/coherence-gate-dflash.sh",
+  "harness": "tools/autokernel-rdna/kernel_lab/harnesses/gemv_hfq6g256_harness.sh",
+  "candidate_dir": "tools/autokernel-rdna/kernel_lab/generated/gemv_hfq6g256/",
+  "promotion_target": "kernels/src/gemv_hfq6g256.gfx1201.hip",
+  "rollback": "git checkout kernels/src/gemv_hfq6g256.gfx1201.hip crates/rdna-compute/src/kernels.rs",
+  "_note": "No existing gfx1201 or gfx12 variant — any accepted candidate is net new. Priority target."
+}

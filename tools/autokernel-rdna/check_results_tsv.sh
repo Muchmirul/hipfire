@@ -95,6 +95,26 @@ for col in "${OPTIONAL_PHASE13_COLS[@]}"; do
     fi
 done
 
+# Phase 14 columns — optional (present only when AUTHOR_KERNEL=1 rows exist).
+OPTIONAL_PHASE14_COLS=(
+    author_kernel_mode
+    target_spec_path
+    candidate_kernel_path
+    harness_correctness_status
+    harness_speedup
+    promoted_to_hipfire
+    hipfire_tok_s_before
+    hipfire_tok_s_after
+    final_decision
+)
+for col in "${OPTIONAL_PHASE14_COLS[@]}"; do
+    if echo "$HEADER" | grep -qw "$col"; then
+        ok "phase14 column present: $col"
+    else
+        warn "phase14 column absent (ok for pre-Phase-14 rows): $col"
+    fi
+done
+
 # Build column index map
 declare -A COL_IDX
 IFS=$'\t' read -ra COLS <<< "$HEADER"
